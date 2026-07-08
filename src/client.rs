@@ -69,11 +69,29 @@ pub fn spawn(ctx: egui::Context, config: &crate::config::Config) -> ClientHandle
     let (audio_system, audio_rx) = audio::start(config, audio_log);
 
     let handle = ClientHandle {
-        commands: cmd_tx,
+        commands: cmd_tx.clone(),
         updates: update_rx,
-        audio_controls: audio_system.controls,
+        audio_controls: audio_system.controls.clone(),
         audio_commands: audio_system.commands,
     };
+
+    // StreamDeck連携用HTTP APIの共有状態
+    let status = Arc::new(Mutex::new(Status::Disconnected));
+    let api_state = Arc::new(crate::api::ApiState {
+        commands: cmd_tx,
+        controls: audio_system.controls,
+        status: status.clone(),
+        log: Box::new({
+            let tx = update_tx.clone();
+            let ctx = ctx.clone();
+            move |message| {
+                tracing::info!("{message}");
+                let _ = tx.send(Update::Log(message));
+                ctx.request_repaint();
+            }
+        }),
+    });
+    let api_port = config.api_port;
 
     let handler = audio_system.handler;
     std::thread::spawn(move || {
@@ -81,7 +99,8 @@ pub fn spawn(ctx: egui::Context, config: &crate::config::Config) -> ClientHandle
             .enable_all()
             .build()
             .expect("tokioランタイムの作成に失敗");
-        rt.block_on(run_worker(cmd_rx, update_tx, ctx, handler, audio_rx));
+        rt.spawn(crate::api::serve(api_port, api_state));
+        rt.block_on(run_worker(cmd_rx, update_tx, ctx, handler, audio_rx, status));
     });
 
     handle
@@ -90,10 +109,15 @@ pub fn spawn(ctx: egui::Context, config: &crate::config::Config) -> ClientHandle
 struct Sender {
     tx: std::sync::mpsc::Sender<Update>,
     ctx: egui::Context,
+    /// HTTP APIの/api/statusにも状態を映す
+    status: Arc<Mutex<Status>>,
 }
 
 impl Sender {
     fn send(&self, update: Update) {
+        if let Update::Status(status) = &update {
+            *self.status.lock().unwrap() = status.clone();
+        }
         let _ = self.tx.send(update);
         self.ctx.request_repaint();
     }
@@ -109,8 +133,9 @@ async fn run_worker(
     ctx: egui::Context,
     audio_handler: Arc<Mutex<audio::AudioHandler>>,
     mut audio_rx: tokio::sync::mpsc::Receiver<OutPacket>,
+    status: Arc<Mutex<Status>>,
 ) {
-    let tx = Sender { tx, ctx };
+    let tx = Sender { tx, ctx, status };
 
     loop {
         // 未接続: Connectコマンドを待つ

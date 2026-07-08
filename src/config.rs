@@ -20,6 +20,10 @@ pub struct Config {
     pub vad_threshold_db: f32,
     /// プッシュトゥトークのキー(Windows仮想キーコード)
     pub ptt_vk: i32,
+    /// StreamDeck連携用ローカルHTTP APIのポート
+    pub api_port: u16,
+    /// Windows起動時に自動起動する(トレイ最小化状態で開始)
+    pub auto_start: bool,
 }
 
 impl Default for Config {
@@ -32,6 +36,8 @@ impl Default for Config {
             voice_mode: VoiceMode::Always,
             vad_threshold_db: -40.0,
             ptt_vk: 0x05, // マウス サイド1 (XButton1)
+            api_port: 9871,
+            auto_start: false,
         }
     }
 }

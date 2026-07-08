@@ -1,11 +1,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod api;
 mod audio;
 mod client;
 mod config;
+mod tray;
 
 use std::collections::VecDeque;
-use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use eframe::egui;
 
@@ -16,8 +19,13 @@ use config::Config;
 fn main() -> eframe::Result {
     tracing_subscriber::fmt::init();
 
+    // 自動起動時はトレイに格納された状態(ウィンドウ非表示)で開始する
+    let minimized = std::env::args().any(|a| a == "--minimized");
+
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([420.0, 640.0]),
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([420.0, 640.0])
+            .with_visible(!minimized),
         ..Default::default()
     };
     eframe::run_native(
@@ -28,6 +36,16 @@ fn main() -> eframe::Result {
             Ok(Box::new(App::new(cc)))
         }),
     )
+}
+
+/// Windows起動時の自動起動(レジストリRunキー)を設定する
+fn build_auto_launch() -> anyhow::Result<auto_launch::AutoLaunch> {
+    let exe = std::env::current_exe()?;
+    Ok(auto_launch::AutoLaunchBuilder::new()
+        .set_app_name("TS3Client")
+        .set_app_path(&exe.to_string_lossy())
+        .set_args(&["--minimized"])
+        .build()?)
 }
 
 /// eguiの標準フォントはCJK非対応のため、Windowsのシステムフォントを追加する
@@ -78,12 +96,25 @@ struct App {
     log: VecDeque<String>,
     input_devices: Vec<String>,
     output_devices: Vec<String>,
+    /// trueのときのみウィンドウの閉じる操作で本当に終了する(通常はトレイへ格納)
+    exiting: Arc<AtomicBool>,
 }
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let config = Config::load();
         let (input_devices, output_devices) = audio::list_devices();
+
+        let exiting = Arc::new(AtomicBool::new(false));
+        tray::spawn(cc.egui_ctx.clone(), exiting.clone());
+
+        // 自動起動が有効なら登録を更新する(exeの移動に追従するため毎回上書き)
+        if config.auto_start {
+            if let Ok(auto) = build_auto_launch() {
+                let _ = auto.enable();
+            }
+        }
+
         let app = Self {
             handle: client::spawn(cc.egui_ctx.clone(), &config),
             config,
@@ -92,6 +123,7 @@ impl App {
             log: VecDeque::new(),
             input_devices,
             output_devices,
+            exiting,
         };
         // 動作確認用: 起動と同時に接続する
         if std::env::args().any(|a| a == "--autoconnect") {
@@ -262,6 +294,37 @@ impl App {
             self.config.save();
         }
     }
+
+    fn general_settings_ui(&mut self, ui: &mut egui::Ui) {
+        let mut auto_start = self.config.auto_start;
+        if ui.checkbox(&mut auto_start, "Windows起動時に自動起動(トレイに格納)").changed() {
+            match build_auto_launch() {
+                Ok(auto) => {
+                    let result = if auto_start { auto.enable() } else { auto.disable() };
+                    match result {
+                        Ok(()) => {
+                            self.config.auto_start = auto_start;
+                            self.config.save();
+                        }
+                        Err(e) => self.push_log(format!("自動起動の設定に失敗: {e}")),
+                    }
+                }
+                Err(e) => self.push_log(format!("自動起動の設定に失敗: {e}")),
+            }
+        }
+        ui.horizontal(|ui| {
+            ui.label("StreamDeck用API:");
+            ui.monospace(format!("http://127.0.0.1:{}/api/", self.config.api_port));
+        });
+        ui.weak("connect / disconnect / mute/on / mute/off / mute/toggle / status");
+    }
+
+    fn push_log(&mut self, line: String) {
+        if self.log.len() >= MAX_LOG_LINES {
+            self.log.pop_front();
+        }
+        self.log.push_back(line);
+    }
 }
 
 impl eframe::App for App {
@@ -269,6 +332,14 @@ impl eframe::App for App {
         self.apply_updates();
         // レベルメーターやPTT状態を映すため、控えめな頻度で再描画し続ける
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+
+        // 閉じるボタンは終了ではなくトレイへの格納にする(トレイの「終了」からのみ終了)
+        if ui.ctx().input(|i| i.viewport().close_requested())
+            && !self.exiting.load(Ordering::Relaxed)
+        {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
 
         egui::Panel::top("connection_panel").show(ui, |ui| {
             ui.add_space(4.0);
@@ -328,6 +399,7 @@ impl eframe::App for App {
             });
             ui.add_space(4.0);
             egui::CollapsingHeader::new("音声設定").show(ui, |ui| self.voice_settings_ui(ui));
+            egui::CollapsingHeader::new("一般設定").show(ui, |ui| self.general_settings_ui(ui));
             ui.add_space(4.0);
         });
 
