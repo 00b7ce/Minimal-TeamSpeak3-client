@@ -8,9 +8,20 @@ use serde::{Deserialize, Serialize};
 use crate::audio::VoiceMode;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServerEntry {
+    /// UI・APIで指定する表示名
+    pub name: String,
+    pub address: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    pub address: String,
+    pub servers: Vec<ServerEntry>,
+    pub selected_server: usize,
+    /// 旧形式(単一アドレス)からの移行用。読み込み時のみ使用し、保存しない
+    #[serde(skip_serializing)]
+    address: Option<String>,
     pub nickname: String,
     /// Noneは「既定のデバイス」
     pub input_device: Option<String>,
@@ -29,7 +40,12 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            address: "192.168.10.8".to_owned(),
+            servers: vec![ServerEntry {
+                name: "自宅サーバ".to_owned(),
+                address: "192.168.10.8".to_owned(),
+            }],
+            selected_server: 0,
+            address: None,
             nickname: "mekabu".to_owned(),
             input_device: None,
             output_device: None,
@@ -49,13 +65,32 @@ fn config_path() -> Option<std::path::PathBuf> {
 impl Config {
     pub fn load() -> Self {
         let Some(path) = config_path() else { return Self::default() };
-        match std::fs::read_to_string(&path) {
+        let config = match std::fs::read_to_string(&path) {
             Ok(text) => toml::from_str(&text).unwrap_or_else(|e| {
                 tracing::warn!("設定ファイルの解析に失敗、既定値を使用: {e}");
                 Self::default()
             }),
             Err(_) => Self::default(), // 初回起動など
+        };
+        config.normalize()
+    }
+
+    /// 旧形式からの移行と不正値の補正
+    fn normalize(mut self) -> Self {
+        if self.servers.is_empty() {
+            let address =
+                self.address.take().unwrap_or_else(|| "192.168.10.8".to_owned());
+            self.servers.push(ServerEntry { name: "サーバ1".to_owned(), address });
         }
+        if self.selected_server >= self.servers.len() {
+            self.selected_server = 0;
+        }
+        self
+    }
+
+    /// 現在選択中のサーバ(serversは常に1件以上ある)
+    pub fn selected(&self) -> &ServerEntry {
+        &self.servers[self.selected_server.min(self.servers.len() - 1)]
     }
 
     pub fn save(&self) {

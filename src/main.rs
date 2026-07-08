@@ -128,7 +128,7 @@ impl App {
         // 動作確認用: 起動と同時に接続する
         if std::env::args().any(|a| a == "--autoconnect") {
             let _ = app.handle.commands.send(Command::Connect {
-                address: app.config.address.clone(),
+                address: app.config.selected().address.clone(),
                 nickname: app.config.nickname.clone(),
             });
         }
@@ -295,6 +295,62 @@ impl App {
         }
     }
 
+    fn server_settings_ui(&mut self, ui: &mut egui::Ui) {
+        let mut save = false;
+        let i = self.config.selected_server;
+
+        ui.horizontal(|ui| {
+            ui.label("表示名:");
+            if ui
+                .add(
+                    egui::TextEdit::singleline(&mut self.config.servers[i].name)
+                        .desired_width(140.0),
+                )
+                .lost_focus()
+            {
+                save = true;
+            }
+            ui.label("アドレス:");
+            if ui
+                .add(
+                    egui::TextEdit::singleline(&mut self.config.servers[i].address)
+                        .desired_width(140.0),
+                )
+                .lost_focus()
+            {
+                save = true;
+            }
+        });
+        ui.horizontal(|ui| {
+            if ui.button("サーバを追加").clicked() {
+                self.config
+                    .servers
+                    .push(config::ServerEntry {
+                        name: format!("サーバ{}", self.config.servers.len() + 1),
+                        address: String::new(),
+                    });
+                self.config.selected_server = self.config.servers.len() - 1;
+                save = true;
+            }
+            // 最後の1件は消せない(接続先が空になるのを防ぐ)
+            if ui
+                .add_enabled(self.config.servers.len() > 1, egui::Button::new("このサーバを削除"))
+                .clicked()
+            {
+                self.config.servers.remove(i);
+                if self.config.selected_server >= self.config.servers.len() {
+                    self.config.selected_server = self.config.servers.len() - 1;
+                }
+                save = true;
+            }
+        });
+        ui.weak("StreamDeckから名前指定で接続: /api/connect/表示名");
+
+        if save {
+            self.config.save();
+        }
+    }
+
     fn general_settings_ui(&mut self, ui: &mut egui::Ui) {
         let mut auto_start = self.config.auto_start;
         if ui.checkbox(&mut auto_start, "Windows起動時に自動起動(トレイに格納)").changed() {
@@ -346,15 +402,25 @@ impl eframe::App for App {
             let connected = !matches!(self.status, Status::Disconnected | Status::Error(_));
             ui.horizontal(|ui| {
                 ui.label("サーバ:");
-                if ui
-                    .add_enabled(
-                        !connected,
-                        egui::TextEdit::singleline(&mut self.config.address).desired_width(140.0),
-                    )
-                    .lost_focus()
-                {
-                    self.config.save();
-                }
+                ui.add_enabled_ui(!connected, |ui| {
+                    let selected_name = self.config.selected().name.clone();
+                    egui::ComboBox::from_id_salt("server_select")
+                        .selected_text(selected_name)
+                        .width(160.0)
+                        .show_ui(ui, |ui| {
+                            for i in 0..self.config.servers.len() {
+                                let is_selected = i == self.config.selected_server;
+                                if ui
+                                    .selectable_label(is_selected, &self.config.servers[i].name)
+                                    .clicked()
+                                    && !is_selected
+                                {
+                                    self.config.selected_server = i;
+                                    self.config.save();
+                                }
+                            }
+                        });
+                });
                 ui.label("名前:");
                 if ui
                     .add_enabled(
@@ -375,7 +441,7 @@ impl eframe::App for App {
                 } else if ui.button("接続").clicked() {
                     self.config.save();
                     let _ = self.handle.commands.send(Command::Connect {
-                        address: self.config.address.trim().to_owned(),
+                        address: self.config.selected().address.trim().to_owned(),
                         nickname: self.config.nickname.trim().to_owned(),
                     });
                 }
@@ -398,6 +464,7 @@ impl eframe::App for App {
                 };
             });
             ui.add_space(4.0);
+            egui::CollapsingHeader::new("サーバ設定").show(ui, |ui| self.server_settings_ui(ui));
             egui::CollapsingHeader::new("音声設定").show(ui, |ui| self.voice_settings_ui(ui));
             egui::CollapsingHeader::new("一般設定").show(ui, |ui| self.general_settings_ui(ui));
             ui.add_space(4.0);

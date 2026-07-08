@@ -5,7 +5,8 @@
 //! GET/POST両対応にしてブラウザからの動作確認も可能にしている。
 //!
 //! エンドポイント:
-//! - `/api/connect`     設定ファイルのサーバへ接続
+//! - `/api/connect`        選択中のサーバへ接続
+//! - `/api/connect/{name}`  登録済みサーバへ表示名を指定して接続
 //! - `/api/disconnect`  切断
 //! - `/api/mute/on` `/api/mute/off` `/api/mute/toggle`  マイクミュート操作
 //! - `/api/status`      接続状態とミュート状態をJSONで返す
@@ -32,6 +33,7 @@ pub struct ApiState {
 pub async fn serve(port: u16, state: Arc<ApiState>) {
     let router = axum::Router::new()
         .route("/api/connect", get(connect).post(connect))
+        .route("/api/connect/{name}", get(connect_named).post(connect_named))
         .route("/api/disconnect", get(disconnect).post(disconnect))
         .route("/api/mute/{action}", get(mute).post(mute))
         .route("/api/status", get(status))
@@ -50,14 +52,32 @@ pub async fn serve(port: u16, state: Arc<ApiState>) {
 }
 
 async fn connect(State(state): State<Arc<ApiState>>) -> &'static str {
-    // アドレス/ニックネームはUIが保存した最新の設定ファイルから読む
+    // サーバ/ニックネームはUIが保存した最新の設定ファイルから読む
     let cfg = crate::config::Config::load();
-    (state.log)("API: 接続要求".to_owned());
+    let server = cfg.selected();
+    (state.log)(format!("API: 接続要求 ({})", server.name));
     let _ = state.commands.send(Command::Connect {
-        address: cfg.address.trim().to_owned(),
+        address: server.address.trim().to_owned(),
         nickname: cfg.nickname.trim().to_owned(),
     });
     "connecting\n"
+}
+
+async fn connect_named(
+    State(state): State<Arc<ApiState>>,
+    Path(name): Path<String>,
+) -> Result<&'static str, StatusCode> {
+    let cfg = crate::config::Config::load();
+    let Some(server) = cfg.servers.iter().find(|s| s.name == name) else {
+        (state.log)(format!("API: 未登録のサーバ名「{name}」への接続要求"));
+        return Err(StatusCode::NOT_FOUND);
+    };
+    (state.log)(format!("API: 接続要求 ({})", server.name));
+    let _ = state.commands.send(Command::Connect {
+        address: server.address.trim().to_owned(),
+        nickname: cfg.nickname.trim().to_owned(),
+    });
+    Ok("connecting\n")
 }
 
 async fn disconnect(State(state): State<Arc<ApiState>>) -> &'static str {
