@@ -31,9 +31,9 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "TS3 Client",
         options,
-        Box::new(|cc| {
+        Box::new(move |cc| {
             setup_japanese_font(&cc.egui_ctx);
-            Ok(Box::new(App::new(cc)))
+            Ok(Box::new(App::new(cc, minimized)))
         }),
     )
 }
@@ -108,7 +108,7 @@ struct App {
 }
 
 impl App {
-    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>, minimized: bool) -> Self {
         let config = Config::load();
         let (input_devices, output_devices) = audio::list_devices();
 
@@ -132,6 +132,18 @@ impl App {
             output_devices,
             exiting,
         };
+
+        // 最小化起動: eframeは初回フレーム描画後に必ずウィンドウを表示してしまう
+        // (with_visible(false)は白フラッシュ対策で上書きされる)ため、
+        // 少し遅らせて非表示コマンドを送り、トレイ格納状態にする
+        if minimized {
+            let ctx = cc.egui_ctx.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(700));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                ctx.request_repaint();
+            });
+        }
         // 動作確認用: 起動と同時に接続する
         if std::env::args().any(|a| a == "--autoconnect") {
             let _ = app.handle.commands.send(Command::Connect {
