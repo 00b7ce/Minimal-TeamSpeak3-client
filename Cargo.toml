@@ -1,0 +1,12 @@
+[package]
+name = "ts3-client"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# 音声(audio)featureはステップ3で有効化する。crates.io版は古いためgit版を使う
+tsclientlib = { git = "https://github.com/ReSpeak/tsclientlib", default-features = false, features = ["default-tls"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time"] }
+futures = "0.3"
+anyhow = "1"
+tracing-subscriber = "0.3"
