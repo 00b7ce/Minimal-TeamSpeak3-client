@@ -15,3 +15,7 @@ cpal = "0.18.1"
 audiopus = "0.3.0-rc.0"
 tsproto-packets = { git = "https://github.com/ReSpeak/tsclientlib", version = "0.1.0" }
 tracing = "0.1.44"
+serde = { version = "1.0.228", features = ["derive"] }
+toml = "1.1.2"
+dirs = "6.0.0"
+windows-sys = { version = "0.61.2", features = ["Win32_UI_Input_KeyboardAndMouse"] }

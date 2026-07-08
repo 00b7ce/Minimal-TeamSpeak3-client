@@ -2,19 +2,22 @@
 
 mod audio;
 mod client;
+mod config;
 
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
 
 use eframe::egui;
 
+use audio::VoiceMode;
 use client::{ChannelInfo, ClientHandle, Command, Status, Update};
+use config::Config;
 
 fn main() -> eframe::Result {
     tracing_subscriber::fmt::init();
 
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([420.0, 560.0]),
+        viewport: egui::ViewportBuilder::default().with_inner_size([420.0, 640.0]),
         ..Default::default()
     };
     eframe::run_native(
@@ -56,30 +59,45 @@ fn setup_japanese_font(ctx: &egui::Context) {
 
 const MAX_LOG_LINES: usize = 200;
 
+/// プッシュトゥトークに選べるキー (Windows仮想キーコード, 表示名)
+const PTT_KEYS: &[(i32, &str)] = &[
+    (0x05, "マウス サイド1"),
+    (0x06, "マウス サイド2"),
+    (0xA0, "左Shift"),
+    (0xA2, "左Ctrl"),
+    (0xA4, "左Alt"),
+    (0x1D, "無変換"),
+    (0x7B, "F12"),
+];
+
 struct App {
     handle: ClientHandle,
-    address: String,
-    nickname: String,
+    config: Config,
     status: Status,
     channels: Vec<ChannelInfo>,
     log: VecDeque<String>,
+    input_devices: Vec<String>,
+    output_devices: Vec<String>,
 }
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        let config = Config::load();
+        let (input_devices, output_devices) = audio::list_devices();
         let app = Self {
-            handle: client::spawn(cc.egui_ctx.clone()),
-            address: "192.168.10.8".to_owned(),
-            nickname: "mekabu".to_owned(),
+            handle: client::spawn(cc.egui_ctx.clone(), &config),
+            config,
             status: Status::Disconnected,
             channels: Vec::new(),
             log: VecDeque::new(),
+            input_devices,
+            output_devices,
         };
         // 動作確認用: 起動と同時に接続する
         if std::env::args().any(|a| a == "--autoconnect") {
             let _ = app.handle.commands.send(Command::Connect {
-                address: app.address.clone(),
-                nickname: app.nickname.clone(),
+                address: app.config.address.clone(),
+                nickname: app.config.nickname.clone(),
             });
         }
         app
@@ -99,20 +117,183 @@ impl App {
             }
         }
     }
+
+    /// デバイス選択コンボボックス。変更されたらtrueを返す
+    fn device_combo(
+        ui: &mut egui::Ui,
+        id: &str,
+        label: &str,
+        selected: &mut Option<String>,
+        devices: &[String],
+    ) -> bool {
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            ui.label(label);
+            let current = selected.as_deref().unwrap_or("(既定のデバイス)");
+            egui::ComboBox::from_id_salt(id).selected_text(current).width(240.0).show_ui(
+                ui,
+                |ui| {
+                    if ui.selectable_label(selected.is_none(), "(既定のデバイス)").clicked() {
+                        if selected.is_some() {
+                            *selected = None;
+                            changed = true;
+                        }
+                    }
+                    for name in devices {
+                        let is_selected = selected.as_deref() == Some(name);
+                        if ui.selectable_label(is_selected, name).clicked() && !is_selected {
+                            *selected = Some(name.clone());
+                            changed = true;
+                        }
+                    }
+                },
+            );
+        });
+        changed
+    }
+
+    fn voice_settings_ui(&mut self, ui: &mut egui::Ui) {
+        let controls = &self.handle.audio_controls;
+        let mut save = false;
+
+        if Self::device_combo(
+            ui,
+            "input_device",
+            "入力デバイス:",
+            &mut self.config.input_device,
+            &self.input_devices,
+        ) {
+            let _ = self
+                .handle
+                .audio_commands
+                .send(audio::AudioCommand::SetInputDevice(self.config.input_device.clone()));
+            save = true;
+        }
+        if Self::device_combo(
+            ui,
+            "output_device",
+            "出力デバイス:",
+            &mut self.config.output_device,
+            &self.output_devices,
+        ) {
+            let _ = self
+                .handle
+                .audio_commands
+                .send(audio::AudioCommand::SetOutputDevice(self.config.output_device.clone()));
+            save = true;
+        }
+
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label("送信モード:");
+            for (mode, name) in [
+                (VoiceMode::Always, "常時送信"),
+                (VoiceMode::VoiceActivation, "ボイス検出"),
+                (VoiceMode::PushToTalk, "プッシュトゥトーク"),
+            ] {
+                if ui.radio(self.config.voice_mode == mode, name).clicked()
+                    && self.config.voice_mode != mode
+                {
+                    self.config.voice_mode = mode;
+                    controls.set_mode(mode);
+                    save = true;
+                }
+            }
+        });
+
+        match self.config.voice_mode {
+            VoiceMode::VoiceActivation => {
+                ui.horizontal(|ui| {
+                    ui.label("閾値:");
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut self.config.vad_threshold_db, -70.0..=0.0)
+                                .suffix(" dB"),
+                        )
+                        .changed()
+                    {
+                        controls.set_vad_threshold_db(self.config.vad_threshold_db);
+                        save = true;
+                    }
+                });
+                // 入力レベルメーター(閾値調整用)
+                let level = controls.input_level_db();
+                let fraction = ((level + 70.0) / 70.0).clamp(0.0, 1.0);
+                ui.horizontal(|ui| {
+                    ui.label("入力レベル:");
+                    ui.add(
+                        egui::ProgressBar::new(fraction)
+                            .desired_width(200.0)
+                            .text(format!("{level:.0} dB")),
+                    );
+                });
+            }
+            VoiceMode::PushToTalk => {
+                ui.horizontal(|ui| {
+                    ui.label("キー:");
+                    let current = PTT_KEYS
+                        .iter()
+                        .find(|(vk, _)| *vk == self.config.ptt_vk)
+                        .map(|(_, name)| *name)
+                        .unwrap_or("?");
+                    egui::ComboBox::from_id_salt("ptt_key").selected_text(current).show_ui(
+                        ui,
+                        |ui| {
+                            for (vk, name) in PTT_KEYS {
+                                if ui
+                                    .selectable_label(self.config.ptt_vk == *vk, *name)
+                                    .clicked()
+                                    && self.config.ptt_vk != *vk
+                                {
+                                    self.config.ptt_vk = *vk;
+                                    controls.set_ptt_vk(*vk);
+                                    save = true;
+                                }
+                            }
+                        },
+                    );
+                    ui.weak("(ウィンドウ非フォーカスでも有効)");
+                });
+            }
+            VoiceMode::Always => {}
+        }
+
+        if save {
+            self.config.save();
+        }
+    }
 }
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.apply_updates();
+        // レベルメーターやPTT状態を映すため、控えめな頻度で再描画し続ける
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
 
         egui::Panel::top("connection_panel").show(ui, |ui| {
             ui.add_space(4.0);
             let connected = !matches!(self.status, Status::Disconnected | Status::Error(_));
             ui.horizontal(|ui| {
                 ui.label("サーバ:");
-                ui.add_enabled(!connected, egui::TextEdit::singleline(&mut self.address).desired_width(140.0));
+                if ui
+                    .add_enabled(
+                        !connected,
+                        egui::TextEdit::singleline(&mut self.config.address).desired_width(140.0),
+                    )
+                    .lost_focus()
+                {
+                    self.config.save();
+                }
                 ui.label("名前:");
-                ui.add_enabled(!connected, egui::TextEdit::singleline(&mut self.nickname).desired_width(80.0));
+                if ui
+                    .add_enabled(
+                        !connected,
+                        egui::TextEdit::singleline(&mut self.config.nickname).desired_width(80.0),
+                    )
+                    .lost_focus()
+                {
+                    self.config.save();
+                }
             });
             ui.add_space(4.0);
             ui.horizontal(|ui| {
@@ -121,24 +302,32 @@ impl eframe::App for App {
                         let _ = self.handle.commands.send(Command::Disconnect);
                     }
                 } else if ui.button("接続").clicked() {
+                    self.config.save();
                     let _ = self.handle.commands.send(Command::Connect {
-                        address: self.address.trim().to_owned(),
-                        nickname: self.nickname.trim().to_owned(),
+                        address: self.config.address.trim().to_owned(),
+                        nickname: self.config.nickname.trim().to_owned(),
                     });
                 }
-                let mut muted = self.handle.muted.load(Ordering::Relaxed);
+                let muted_flag = &self.handle.audio_controls.muted;
+                let mut muted = muted_flag.load(Ordering::Relaxed);
                 if ui.checkbox(&mut muted, "ミュート").changed() {
-                    self.handle.muted.store(muted, Ordering::Relaxed);
+                    muted_flag.store(muted, Ordering::Relaxed);
                 }
                 match &self.status {
                     Status::Disconnected => ui.label("未接続"),
                     Status::Connecting => ui.label("接続中..."),
-                    Status::Connected { server_name } => {
-                        ui.colored_label(egui::Color32::from_rgb(0, 160, 60), format!("接続済: {server_name}"))
-                    }
-                    Status::Error(e) => ui.colored_label(egui::Color32::from_rgb(200, 60, 60), format!("エラー: {e}")),
+                    Status::Connected { server_name } => ui.colored_label(
+                        egui::Color32::from_rgb(0, 160, 60),
+                        format!("接続済: {server_name}"),
+                    ),
+                    Status::Error(e) => ui.colored_label(
+                        egui::Color32::from_rgb(200, 60, 60),
+                        format!("エラー: {e}"),
+                    ),
                 };
             });
+            ui.add_space(4.0);
+            egui::CollapsingHeader::new("音声設定").show(ui, |ui| self.voice_settings_ui(ui));
             ui.add_space(4.0);
         });
 
@@ -174,6 +363,7 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self) {
+        self.config.save();
         // ウィンドウを閉じたときも正規の切断処理を試みる
         let _ = self.handle.commands.send(Command::Disconnect);
         std::thread::sleep(std::time::Duration::from_millis(300));

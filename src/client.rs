@@ -7,7 +7,6 @@
 //! 音声は`audio`モジュールが担当し、ワーカーは
 //! 「エンコード済みパケットの送信」と「受信パケットのデコーダ投入」だけを中継する。
 
-use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use eframe::egui;
@@ -47,12 +46,14 @@ pub enum Update {
 pub struct ClientHandle {
     pub commands: tokio::sync::mpsc::UnboundedSender<Command>,
     pub updates: std::sync::mpsc::Receiver<Update>,
-    /// マイクミュート(UIから直接切り替える)
-    pub muted: Arc<AtomicBool>,
+    /// 送信モード・ミュート・レベルメーターなど(UIから直接読み書きする)
+    pub audio_controls: Arc<audio::Controls>,
+    /// 音声デバイスの切替依頼
+    pub audio_commands: std::sync::mpsc::Sender<audio::AudioCommand>,
 }
 
 /// 音声システムとワーカースレッドを起動する。`ctx`はUpdate送信時の再描画要求に使う。
-pub fn spawn(ctx: egui::Context) -> ClientHandle {
+pub fn spawn(ctx: egui::Context, config: &crate::config::Config) -> ClientHandle {
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
     let (update_tx, update_rx) = std::sync::mpsc::channel();
 
@@ -65,18 +66,25 @@ pub fn spawn(ctx: egui::Context) -> ClientHandle {
             ctx.request_repaint();
         }
     };
-    let (audio_system, audio_rx) = audio::start(audio_log);
-    let muted = audio_system.muted.clone();
+    let (audio_system, audio_rx) = audio::start(config, audio_log);
 
+    let handle = ClientHandle {
+        commands: cmd_tx,
+        updates: update_rx,
+        audio_controls: audio_system.controls,
+        audio_commands: audio_system.commands,
+    };
+
+    let handler = audio_system.handler;
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("tokioランタイムの作成に失敗");
-        rt.block_on(run_worker(cmd_rx, update_tx, ctx, audio_system.handler, audio_rx));
+        rt.block_on(run_worker(cmd_rx, update_tx, ctx, handler, audio_rx));
     });
 
-    ClientHandle { commands: cmd_tx, updates: update_rx, muted }
+    handle
 }
 
 struct Sender {
