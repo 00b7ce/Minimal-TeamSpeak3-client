@@ -35,6 +35,8 @@ pub struct Config {
     pub api_port: u16,
     /// Windows起動時に自動起動する(トレイ最小化状態で開始)
     pub auto_start: bool,
+    /// 相手ごとの再生音量(ニックネーム → 倍率1.0=100%)。IDはセッションごとに変わるため名前で持つ
+    pub volumes: std::collections::HashMap<String, f32>,
 }
 
 impl Default for Config {
@@ -54,6 +56,7 @@ impl Default for Config {
             ptt_vk: 0x05, // マウス サイド1 (XButton1)
             api_port: 9871,
             auto_start: false,
+            volumes: std::collections::HashMap::new(),
         }
     }
 }

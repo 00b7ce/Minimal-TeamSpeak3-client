@@ -31,9 +31,15 @@ pub enum Status {
 }
 
 #[derive(Debug, Clone)]
+pub struct ClientInfo {
+    pub id: u16,
+    pub name: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct ChannelInfo {
     pub name: String,
-    pub clients: Vec<String>,
+    pub clients: Vec<ClientInfo>,
 }
 
 #[derive(Debug)]
@@ -50,6 +56,10 @@ pub struct ClientHandle {
     pub audio_controls: Arc<audio::Controls>,
     /// 音声デバイスの切替依頼
     pub audio_commands: std::sync::mpsc::Sender<audio::AudioCommand>,
+    /// 受信音声のキュー(再生中の相手の音量を即時変更するのに使う)
+    pub audio_handler: Arc<Mutex<audio::AudioHandler>>,
+    /// 相手ごとの再生音量(ニックネーム → 倍率)。新しい話者のキュー作成時に適用される
+    pub volumes: Arc<Mutex<std::collections::HashMap<String, f32>>>,
 }
 
 /// 音声システムとワーカースレッドを起動する。`ctx`はUpdate送信時の再描画要求に使う。
@@ -67,12 +77,15 @@ pub fn spawn(ctx: egui::Context, config: &crate::config::Config) -> ClientHandle
         }
     };
     let (audio_system, audio_rx) = audio::start(config, audio_log);
+    let volumes = Arc::new(Mutex::new(config.volumes.clone()));
 
     let handle = ClientHandle {
         commands: cmd_tx.clone(),
         updates: update_rx,
         audio_controls: audio_system.controls.clone(),
         audio_commands: audio_system.commands,
+        audio_handler: audio_system.handler.clone(),
+        volumes: volumes.clone(),
     };
 
     // StreamDeck連携用HTTP APIの共有状態
@@ -100,7 +113,7 @@ pub fn spawn(ctx: egui::Context, config: &crate::config::Config) -> ClientHandle
             .build()
             .expect("tokioランタイムの作成に失敗");
         rt.spawn(crate::api::serve(api_port, api_state));
-        rt.block_on(run_worker(cmd_rx, update_tx, ctx, handler, audio_rx, status));
+        rt.block_on(run_worker(cmd_rx, update_tx, ctx, handler, audio_rx, status, volumes));
     });
 
     handle
@@ -134,6 +147,7 @@ async fn run_worker(
     audio_handler: Arc<Mutex<audio::AudioHandler>>,
     mut audio_rx: tokio::sync::mpsc::Receiver<OutPacket>,
     status: Arc<Mutex<Status>>,
+    volumes: Arc<Mutex<std::collections::HashMap<String, f32>>>,
 ) {
     let tx = Sender { tx, ctx, status };
 
@@ -162,7 +176,9 @@ async fn run_worker(
         while audio_rx.try_recv().is_ok() {}
 
         // 接続中: イベント・コマンド・送信音声を並行して処理する
-        let exit = connected_loop(&mut con, &mut cmd_rx, &mut audio_rx, &audio_handler, &tx).await;
+        let exit =
+            connected_loop(&mut con, &mut cmd_rx, &mut audio_rx, &audio_handler, &volumes, &tx)
+                .await;
 
         audio_handler.lock().unwrap().reset();
         tx.send(Update::Status(Status::Disconnected));
@@ -179,6 +195,7 @@ async fn connected_loop(
     cmd_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Command>,
     audio_rx: &mut tokio::sync::mpsc::Receiver<OutPacket>,
     audio_handler: &Arc<Mutex<audio::AudioHandler>>,
+    volumes: &Arc<Mutex<std::collections::HashMap<String, f32>>>,
     tx: &Sender,
 ) -> bool {
     loop {
@@ -224,8 +241,24 @@ async fn connected_loop(
                     }
                     _ => continue,
                 };
-                if let Err(e) = audio_handler.lock().unwrap().handle_packet(from, packet) {
-                    tracing::debug!("受信音声の処理に失敗: {e}");
+                match audio_handler.lock().unwrap().handle_packet(from, packet) {
+                    // 新しく話し始めた相手: 保存済みの音量をキューに適用する
+                    Ok(Some(new_talker)) => {
+                        let name = con
+                            .get_state()
+                            .ok()
+                            .and_then(|s| s.clients.get(&new_talker).map(|c| c.name.clone()));
+                        if let Some(volume) =
+                            name.and_then(|n| volumes.lock().unwrap().get(&n).copied())
+                        {
+                            let mut handler = audio_handler.lock().unwrap();
+                            if let Some(queue) = handler.get_mut_queues().get_mut(&new_talker) {
+                                queue.volume = volume;
+                            }
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => tracing::debug!("受信音声の処理に失敗: {e}"),
                 }
             }
             Step::Event(Some(Ok(StreamItem::BookEvents(events)))) => {
@@ -258,13 +291,13 @@ fn build_snapshot(state: &tsclientlib::data::Connection) -> Vec<ChannelInfo> {
     channels
         .into_iter()
         .map(|(id, channel)| {
-            let mut clients: Vec<String> = state
+            let mut clients: Vec<ClientInfo> = state
                 .clients
-                .values()
-                .filter(|c| c.channel == *id)
-                .map(|c| c.name.clone())
+                .iter()
+                .filter(|(_, c)| c.channel == *id)
+                .map(|(cid, c)| ClientInfo { id: cid.0, name: c.name.clone() })
                 .collect();
-            clients.sort();
+            clients.sort_by(|a, b| a.name.cmp(&b.name));
             ChannelInfo { name: channel.name.clone(), clients }
         })
         .collect()

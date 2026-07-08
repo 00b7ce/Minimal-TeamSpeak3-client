@@ -88,6 +88,13 @@ const PTT_KEYS: &[(i32, &str)] = &[
     (0x7B, "F12"),
 ];
 
+struct VolumeChange {
+    name: String,
+    client_id: u16,
+    volume: f32,
+    save: bool,
+}
+
 struct App {
     handle: ClientHandle,
     config: Config,
@@ -375,6 +382,29 @@ impl App {
         ui.weak("connect / disconnect / mute/on / mute/off / mute/toggle / status");
     }
 
+    /// 音量変更を設定・共有マップ・再生中キューの3か所へ反映する
+    fn apply_volume_change(&mut self, change: VolumeChange) {
+        let is_default = (change.volume - 1.0).abs() < 0.005;
+        if is_default {
+            self.config.volumes.remove(&change.name);
+            self.handle.volumes.lock().unwrap().remove(&change.name);
+        } else {
+            self.config.volumes.insert(change.name.clone(), change.volume);
+            self.handle.volumes.lock().unwrap().insert(change.name.clone(), change.volume);
+        }
+        // 再生中(発話中)なら即時反映
+        let mut handler = self.handle.audio_handler.lock().unwrap();
+        if let Some(queue) =
+            handler.get_mut_queues().get_mut(&tsclientlib::ClientId(change.client_id))
+        {
+            queue.volume = change.volume;
+        }
+        drop(handler);
+        if change.save {
+            self.config.save();
+        }
+    }
+
     fn push_log(&mut self, line: String) {
         if self.log.len() >= MAX_LOG_LINES {
             self.log.pop_front();
@@ -483,6 +513,8 @@ impl eframe::App for App {
                 });
             });
 
+        // コンテキストメニュー内では&mut selfを取れないため、音量変更は集めてから適用する
+        let mut volume_changes: Vec<VolumeChange> = Vec::new();
         egui::CentralPanel::default().show(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 if self.channels.is_empty() {
@@ -493,12 +525,53 @@ impl eframe::App for App {
                     for client in &channel.clients {
                         ui.horizontal(|ui| {
                             ui.add_space(20.0);
-                            ui.label(format!("👤 {client}"));
+                            let volume = self
+                                .config
+                                .volumes
+                                .get(&client.name)
+                                .copied()
+                                .unwrap_or(1.0);
+                            let label = if (volume - 1.0).abs() < 0.005 {
+                                format!("👤 {}", client.name)
+                            } else {
+                                format!("👤 {} 🔊{:.0}%", client.name, volume * 100.0)
+                            };
+                            let response =
+                                ui.label(label).on_hover_text("右クリックで音量調整");
+                            response.context_menu(|ui| {
+                                ui.set_min_width(220.0);
+                                ui.label(format!("{} の音量", client.name));
+                                let mut percent = volume * 100.0;
+                                let slider = ui.add(
+                                    egui::Slider::new(&mut percent, 0.0..=200.0).suffix("%"),
+                                );
+                                if slider.changed() || slider.drag_stopped() {
+                                    volume_changes.push(VolumeChange {
+                                        name: client.name.clone(),
+                                        client_id: client.id,
+                                        volume: percent / 100.0,
+                                        // ドラッグ中は保存せず、離したときにファイルへ書く
+                                        save: slider.drag_stopped(),
+                                    });
+                                }
+                                if ui.button("100%に戻す").clicked() {
+                                    volume_changes.push(VolumeChange {
+                                        name: client.name.clone(),
+                                        client_id: client.id,
+                                        volume: 1.0,
+                                        save: true,
+                                    });
+                                    ui.close();
+                                }
+                            });
                         });
                     }
                 }
             });
         });
+        for change in volume_changes {
+            self.apply_volume_change(change);
+        }
     }
 
     fn on_exit(&mut self) {
