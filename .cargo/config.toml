@@ -1,0 +1,4 @@
+# audiopus_sys同梱のlibopusはcmake_minimum_requiredが古く、
+# CMake 4以降ではこの指定がないとconfigureに失敗する
+[env]
+CMAKE_POLICY_VERSION_MINIMUM = "3.5"

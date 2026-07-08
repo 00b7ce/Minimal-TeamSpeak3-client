@@ -3,10 +3,19 @@
 //! UIスレッドとは2本のチャネルでやり取りする:
 //! - `Command` (UI → ワーカー): 接続/切断の指示
 //! - `Update` (ワーカー → UI): 接続状態・チャンネル一覧・ログ
+//!
+//! 音声は`audio`モジュールが担当し、ワーカーは
+//! 「エンコード済みパケットの送信」と「受信パケットのデコーダ投入」だけを中継する。
+
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 
 use eframe::egui;
 use futures::prelude::*;
-use tsclientlib::{Connection, DisconnectOptions, StreamItem};
+use tsclientlib::{ClientId, Connection, DisconnectOptions, StreamItem};
+use tsproto_packets::packets::{AudioData, OutPacket};
+
+use crate::audio;
 
 #[derive(Debug)]
 pub enum Command {
@@ -38,22 +47,36 @@ pub enum Update {
 pub struct ClientHandle {
     pub commands: tokio::sync::mpsc::UnboundedSender<Command>,
     pub updates: std::sync::mpsc::Receiver<Update>,
+    /// マイクミュート(UIから直接切り替える)
+    pub muted: Arc<AtomicBool>,
 }
 
-/// ワーカースレッドを起動する。`ctx`はUpdate送信時の再描画要求に使う。
+/// 音声システムとワーカースレッドを起動する。`ctx`はUpdate送信時の再描画要求に使う。
 pub fn spawn(ctx: egui::Context) -> ClientHandle {
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
     let (update_tx, update_rx) = std::sync::mpsc::channel();
+
+    let audio_log = {
+        let tx = update_tx.clone();
+        let ctx = ctx.clone();
+        move |message: String| {
+            tracing::info!("audio: {message}");
+            let _ = tx.send(Update::Log(message));
+            ctx.request_repaint();
+        }
+    };
+    let (audio_system, audio_rx) = audio::start(audio_log);
+    let muted = audio_system.muted.clone();
 
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("tokioランタイムの作成に失敗");
-        rt.block_on(run_worker(cmd_rx, update_tx, ctx));
+        rt.block_on(run_worker(cmd_rx, update_tx, ctx, audio_system.handler, audio_rx));
     });
 
-    ClientHandle { commands: cmd_tx, updates: update_rx }
+    ClientHandle { commands: cmd_tx, updates: update_rx, muted }
 }
 
 struct Sender {
@@ -76,6 +99,8 @@ async fn run_worker(
     mut cmd_rx: tokio::sync::mpsc::UnboundedReceiver<Command>,
     tx: std::sync::mpsc::Sender<Update>,
     ctx: egui::Context,
+    audio_handler: Arc<Mutex<audio::AudioHandler>>,
+    mut audio_rx: tokio::sync::mpsc::Receiver<OutPacket>,
 ) {
     let tx = Sender { tx, ctx };
 
@@ -100,9 +125,13 @@ async fn run_worker(
             }
         };
 
-        // 接続中: イベントとコマンドを並行して処理する
-        let exit = connected_loop(&mut con, &mut cmd_rx, &tx).await;
+        // 未接続の間に溜まった送信パケットを捨てる
+        while audio_rx.try_recv().is_ok() {}
 
+        // 接続中: イベント・コマンド・送信音声を並行して処理する
+        let exit = connected_loop(&mut con, &mut cmd_rx, &mut audio_rx, &audio_handler, &tx).await;
+
+        audio_handler.lock().unwrap().reset();
         tx.send(Update::Status(Status::Disconnected));
         tx.send(Update::Snapshot(Vec::new()));
         if exit {
@@ -115,17 +144,21 @@ async fn run_worker(
 async fn connected_loop(
     con: &mut Connection,
     cmd_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Command>,
+    audio_rx: &mut tokio::sync::mpsc::Receiver<OutPacket>,
+    audio_handler: &Arc<Mutex<audio::AudioHandler>>,
     tx: &Sender,
 ) -> bool {
     loop {
         enum Step {
             Cmd(Option<Command>),
+            AudioOut(Option<OutPacket>),
             Event(Option<Result<StreamItem, tsclientlib::Error>>),
         }
         // con.events()のストリームはselect!のスコープ内でのみ生存させ、
         // 分岐を抜けたあとにget_state()でconを再借用できるようにする
         let step = tokio::select! {
             cmd = cmd_rx.recv() => Step::Cmd(cmd),
+            packet = audio_rx.recv() => Step::AudioOut(packet),
             item = async { con.events().next().await } => Step::Event(item),
         };
 
@@ -142,6 +175,25 @@ async fn connected_loop(
                 }
                 tx.log("切断しました");
                 return ui_closed;
+            }
+            Step::AudioOut(Some(packet)) => {
+                if let Err(e) = con.send_audio(packet) {
+                    tx.log(format!("音声送信エラー: {e}"));
+                }
+            }
+            Step::AudioOut(None) => {
+                tx.log("音声キャプチャが停止しました");
+            }
+            Step::Event(Some(Ok(StreamItem::Audio(packet)))) => {
+                let from = match packet.data().data() {
+                    AudioData::S2C { from, .. } | AudioData::S2CWhisper { from, .. } => {
+                        ClientId(*from)
+                    }
+                    _ => continue,
+                };
+                if let Err(e) = audio_handler.lock().unwrap().handle_packet(from, packet) {
+                    tracing::debug!("受信音声の処理に失敗: {e}");
+                }
             }
             Step::Event(Some(Ok(StreamItem::BookEvents(events)))) => {
                 for event in &events {

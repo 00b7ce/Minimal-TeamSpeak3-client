@@ -1,8 +1,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod audio;
 mod client;
 
 use std::collections::VecDeque;
+use std::sync::atomic::Ordering;
 
 use eframe::egui;
 
@@ -123,6 +125,10 @@ impl eframe::App for App {
                         address: self.address.trim().to_owned(),
                         nickname: self.nickname.trim().to_owned(),
                     });
+                }
+                let mut muted = self.handle.muted.load(Ordering::Relaxed);
+                if ui.checkbox(&mut muted, "ミュート").changed() {
+                    self.handle.muted.store(muted, Ordering::Relaxed);
                 }
                 match &self.status {
                     Status::Disconnected => ui.label("未接続"),
