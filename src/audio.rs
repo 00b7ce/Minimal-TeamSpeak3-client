@@ -105,11 +105,58 @@ pub enum AudioCommand {
     SetOutputDevice(Option<String>),
 }
 
+/// 効果音のサンプルキュー(48kHzステレオ・インターリーブ)。
+/// 再生コールバックが受信音声にミックスして消費する
+pub type EffectsQueue = Arc<Mutex<std::collections::VecDeque<f32>>>;
+
+#[derive(Debug, Clone, Copy)]
+pub enum SoundEffect {
+    /// 接続完了(上昇2音)
+    Connect,
+    /// 切断(下降2音)
+    Disconnect,
+}
+
+/// 効果音を再生キューへ積む
+pub fn queue_effect(queue: &EffectsQueue, effect: SoundEffect) {
+    let notes: &[f32] = match effect {
+        SoundEffect::Connect => &[523.25, 783.99],  // C5 → G5
+        SoundEffect::Disconnect => &[783.99, 523.25], // G5 → C5
+    };
+    let mut queue = queue.lock().unwrap();
+    // 再生が止まっている場合の無限成長を防ぐ(5秒分で頭打ち)
+    if queue.len() > TS_RATE as usize * 2 * 5 {
+        return;
+    }
+    queue.extend(render_chime(notes));
+}
+
+/// 短いチャイム音を合成する(1音120ms、サイン波+エンベロープ)
+fn render_chime(freqs: &[f32]) -> Vec<f32> {
+    const NOTE_SAMPLES: usize = TS_RATE as usize * 120 / 1000;
+    const AMPLITUDE: f32 = 0.20;
+    let mut out = Vec::with_capacity(freqs.len() * NOTE_SAMPLES * 2);
+    for &freq in freqs {
+        for i in 0..NOTE_SAMPLES {
+            let t = i as f32 / TS_RATE as f32;
+            // 立ち上がり5ms、その後は緩やかに減衰
+            let attack = (i as f32 / (TS_RATE as f32 * 0.005)).min(1.0);
+            let decay = 1.0 - i as f32 / NOTE_SAMPLES as f32;
+            let sample = (t * freq * std::f32::consts::TAU).sin() * AMPLITUDE * attack * decay;
+            out.push(sample); // L
+            out.push(sample); // R
+        }
+    }
+    out
+}
+
 pub struct AudioSystem {
     /// 受信音声のデコード/ミキシング。ワーカーが受信パケットを入れ、再生コールバックが取り出す
     pub handler: Arc<Mutex<AudioHandler>>,
     pub controls: Arc<Controls>,
     pub commands: std::sync::mpsc::Sender<AudioCommand>,
+    /// 効果音キュー(queue_effectで積む)
+    pub effects: EffectsQueue,
 }
 
 /// 選択可能なデバイス名の一覧 (入力, 出力)
@@ -129,6 +176,7 @@ pub fn start(
 ) -> (AudioSystem, tokio::sync::mpsc::Receiver<OutPacket>) {
     let handler = Arc::new(Mutex::new(AudioHandler::new()));
     let controls = Arc::new(Controls::new(cfg));
+    let effects: EffectsQueue = Arc::new(Mutex::new(std::collections::VecDeque::new()));
     let (packet_tx, packet_rx) = tokio::sync::mpsc::channel(8);
     let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<AudioCommand>();
 
@@ -136,12 +184,13 @@ pub fn start(
         handler: handler.clone(),
         controls: controls.clone(),
         commands: cmd_tx,
+        effects: effects.clone(),
     };
     let mut input_name = cfg.input_device.clone();
     let mut output_name = cfg.output_device.clone();
 
     std::thread::spawn(move || {
-        let mut out_stream = match build_playback(&output_name, handler.clone(), &log) {
+        let mut out_stream = match build_playback(&output_name, handler.clone(), effects.clone(), &log) {
             Ok(s) => Some(s),
             Err(e) => {
                 log(format!("再生デバイスの初期化に失敗: {e:#}"));
@@ -171,7 +220,7 @@ pub fn start(
                 AudioCommand::SetOutputDevice(name) => {
                     output_name = name;
                     drop(out_stream.take());
-                    match build_playback(&output_name, handler.clone(), &log) {
+                    match build_playback(&output_name, handler.clone(), effects.clone(), &log) {
                         Ok(s) => out_stream = Some(s),
                         Err(e) => log(format!("再生デバイスの切替に失敗: {e:#}")),
                     }
@@ -207,6 +256,7 @@ fn find_device(
 fn build_playback(
     name: &Option<String>,
     handler: Arc<Mutex<AudioHandler>>,
+    effects: EffectsQueue,
     log: &impl Fn(String),
 ) -> Result<cpal::Stream> {
     let device = find_device(name, false, log)?;
@@ -241,6 +291,18 @@ fn build_playback(
                     fetch_buf.clear();
                     fetch_buf.resize((needed - have) * 2, 0.0);
                     handler.lock().unwrap().fill_buffer(&mut fetch_buf);
+                    // 効果音(接続/切断チャイム)をミックスする
+                    {
+                        let mut effects = effects.lock().unwrap();
+                        if !effects.is_empty() {
+                            for sample in fetch_buf.iter_mut() {
+                                match effects.pop_front() {
+                                    Some(v) => *sample += v,
+                                    None => break,
+                                }
+                            }
+                        }
+                    }
                     src.extend_from_slice(&fetch_buf);
                 }
 

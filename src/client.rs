@@ -107,13 +107,16 @@ pub fn spawn(ctx: egui::Context, config: &crate::config::Config) -> ClientHandle
     let api_port = config.api_port;
 
     let handler = audio_system.handler;
+    let effects = audio_system.effects;
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("tokioランタイムの作成に失敗");
         rt.spawn(crate::api::serve(api_port, api_state));
-        rt.block_on(run_worker(cmd_rx, update_tx, ctx, handler, audio_rx, status, volumes));
+        rt.block_on(run_worker(
+            cmd_rx, update_tx, ctx, handler, audio_rx, status, volumes, effects,
+        ));
     });
 
     handle
@@ -124,12 +127,23 @@ struct Sender {
     ctx: egui::Context,
     /// HTTP APIの/api/statusにも状態を映す
     status: Arc<Mutex<Status>>,
+    /// 接続/切断チャイム用
+    effects: audio::EffectsQueue,
 }
 
 impl Sender {
     fn send(&self, update: Update) {
-        if let Update::Status(status) = &update {
-            *self.status.lock().unwrap() = status.clone();
+        if let Update::Status(new_status) = &update {
+            let mut status = self.status.lock().unwrap();
+            // 状態遷移で効果音を鳴らす(UI/API/切断イベントのどこから来ても通る)
+            let was_connected = matches!(&*status, Status::Connected { .. });
+            let is_connected = matches!(new_status, Status::Connected { .. });
+            if is_connected && !was_connected {
+                audio::queue_effect(&self.effects, audio::SoundEffect::Connect);
+            } else if was_connected && !is_connected {
+                audio::queue_effect(&self.effects, audio::SoundEffect::Disconnect);
+            }
+            *status = new_status.clone();
         }
         let _ = self.tx.send(update);
         self.ctx.request_repaint();
@@ -148,8 +162,9 @@ async fn run_worker(
     mut audio_rx: tokio::sync::mpsc::Receiver<OutPacket>,
     status: Arc<Mutex<Status>>,
     volumes: Arc<Mutex<std::collections::HashMap<String, f32>>>,
+    effects: audio::EffectsQueue,
 ) {
-    let tx = Sender { tx, ctx, status };
+    let tx = Sender { tx, ctx, status, effects };
 
     loop {
         // 未接続: Connectコマンドを待つ
