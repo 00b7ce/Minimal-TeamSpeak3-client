@@ -1,4 +1,4 @@
-//! 音声入出力モジュール。
+﻿//! 音声入出力モジュール。
 //!
 //! - 送信: マイク入力 → モノラル化 → 48kHzへ変換 → 送信判定(常時/VAD/PTT)
 //!   → 20msフレームでOpusエンコード → `OutPacket`
@@ -123,7 +123,7 @@ pub fn queue_effect(queue: &EffectsQueue, effect: SoundEffect) {
         SoundEffect::Connect => &[523.25, 783.99],  // C5 → G5
         SoundEffect::Disconnect => &[783.99, 523.25], // G5 → C5
     };
-    let mut queue = queue.lock().unwrap();
+    let mut queue = crate::lock(&queue);
     // 再生が止まっている場合の無限成長を防ぐ(5秒分で頭打ち)
     if queue.len() > TS_RATE as usize * 2 * 5 {
         return;
@@ -290,10 +290,10 @@ fn build_playback(
                 if needed > have {
                     fetch_buf.clear();
                     fetch_buf.resize((needed - have) * 2, 0.0);
-                    handler.lock().unwrap().fill_buffer(&mut fetch_buf);
+                    crate::lock(&handler).fill_buffer(&mut fetch_buf);
                     // 効果音(接続/切断チャイム)をミックスする
                     {
-                        let mut effects = effects.lock().unwrap();
+                        let mut effects = crate::lock(&effects);
                         if !effects.is_empty() {
                             for sample in fetch_buf.iter_mut() {
                                 match effects.pop_front() {

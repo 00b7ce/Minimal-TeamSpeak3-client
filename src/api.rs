@@ -1,4 +1,4 @@
-//! StreamDeck連携用のローカルHTTP API。
+﻿//! StreamDeck連携用のローカルHTTP API。
 //!
 //! `http://127.0.0.1:{port}` で待ち受ける(LAN外には公開しない)。
 //! StreamDeck側はHTTPリクエストを送れるプラグイン(API Ninja等)から叩く想定。
@@ -113,7 +113,7 @@ struct StatusResponse {
 }
 
 async fn status(State(state): State<Arc<ApiState>>) -> Json<StatusResponse> {
-    let (status, server_name, error) = match &*state.status.lock().unwrap() {
+    let (status, server_name, error) = match &*crate::lock(&state.status) {
         Status::Disconnected => ("disconnected", None, None),
         Status::Connecting => ("connecting", None, None),
         Status::Connected { server_name } => ("connected", Some(server_name.clone()), None),

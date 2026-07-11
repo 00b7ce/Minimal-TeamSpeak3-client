@@ -1,4 +1,4 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+﻿#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod api;
 mod audio;
@@ -16,8 +16,61 @@ use audio::VoiceMode;
 use client::{ChannelInfo, ClientHandle, Command, Status, Update};
 use config::Config;
 
+/// Mutexのロック。パニックで毒化されていても続行する
+/// (音声コールバックスレッドのパニックが他スレッドへ連鎖して全体が止まるのを防ぐ)
+pub fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// コンソールとログファイル(%APPDATA%\ts3-client\ts3-client.log)の両方へ出力する
+fn init_logging() {
+    use std::io::Write;
+
+    let file = (|| {
+        let dir = dirs::config_dir()?.join("ts3-client");
+        std::fs::create_dir_all(&dir).ok()?;
+        let path = dir.join("ts3-client.log");
+        // 肥大化したら作り直す
+        if std::fs::metadata(&path).map(|m| m.len() > 5 * 1024 * 1024).unwrap_or(false) {
+            let _ = std::fs::remove_file(&path);
+        }
+        std::fs::OpenOptions::new().create(true).append(true).open(path).ok()
+    })()
+    .map(|f| Arc::new(std::sync::Mutex::new(f)));
+
+    struct Tee {
+        file: Option<Arc<std::sync::Mutex<std::fs::File>>>,
+    }
+    impl Write for Tee {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let _ = std::io::stderr().write_all(buf);
+            if let Some(file) = &self.file {
+                let _ = lock(file).write_all(buf);
+            }
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            if let Some(file) = &self.file {
+                let _ = lock(file).flush();
+            }
+            Ok(())
+        }
+    }
+
+    tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(move || Tee { file: file.clone() })
+        .init();
+
+    // どのスレッドで落ちてもログファイルに残す
+    std::panic::set_hook(Box::new(|info| {
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        tracing::error!("パニック発生: {info}\n{backtrace}");
+    }));
+}
+
 fn main() -> eframe::Result {
-    tracing_subscriber::fmt::init();
+    init_logging();
 
     // 自動起動時はトレイに格納された状態(ウィンドウ非表示)で開始する
     let minimized = std::env::args().any(|a| a == "--minimized");
@@ -399,13 +452,13 @@ impl App {
         let is_default = (change.volume - 1.0).abs() < 0.005;
         if is_default {
             self.config.volumes.remove(&change.name);
-            self.handle.volumes.lock().unwrap().remove(&change.name);
+            lock(&self.handle.volumes).remove(&change.name);
         } else {
             self.config.volumes.insert(change.name.clone(), change.volume);
-            self.handle.volumes.lock().unwrap().insert(change.name.clone(), change.volume);
+            lock(&self.handle.volumes).insert(change.name.clone(), change.volume);
         }
         // 再生中(発話中)なら即時反映
-        let mut handler = self.handle.audio_handler.lock().unwrap();
+        let mut handler = lock(&self.handle.audio_handler);
         if let Some(queue) =
             handler.get_mut_queues().get_mut(&tsclientlib::ClientId(change.client_id))
         {
