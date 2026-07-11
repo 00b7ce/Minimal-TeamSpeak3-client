@@ -103,6 +103,9 @@ impl Controls {
 pub enum AudioCommand {
     SetInputDevice(Option<String>),
     SetOutputDevice(Option<String>),
+    /// ストリームエラー発生時の作り直し(エラーコールバックから送られる内部用)
+    RebuildInput,
+    RebuildOutput,
 }
 
 /// 効果音のサンプルキュー(48kHzステレオ・インターリーブ)。
@@ -117,13 +120,14 @@ pub enum SoundEffect {
     Disconnect,
 }
 
-/// 効果音を再生キューへ積む
+/// 効果音を再生キューへ積む。接続ワーカーから呼ばれるため待たない
+/// (音声スレッドがロック保持中なら効果音を諦める)
 pub fn queue_effect(queue: &EffectsQueue, effect: SoundEffect) {
     let notes: &[f32] = match effect {
         SoundEffect::Connect => &[523.25, 783.99],  // C5 → G5
         SoundEffect::Disconnect => &[783.99, 523.25], // G5 → C5
     };
-    let mut queue = crate::lock(&queue);
+    let Some(mut queue) = crate::try_lock(queue) else { return };
     // 再生が止まっている場合の無限成長を防ぐ(5秒分で頭打ち)
     if queue.len() > TS_RATE as usize * 2 * 5 {
         return;
@@ -183,36 +187,48 @@ pub fn start(
     let system = AudioSystem {
         handler: handler.clone(),
         controls: controls.clone(),
-        commands: cmd_tx,
+        commands: cmd_tx.clone(),
         effects: effects.clone(),
     };
     let mut input_name = cfg.input_device.clone();
     let mut output_name = cfg.output_device.clone();
 
     std::thread::spawn(move || {
-        let mut out_stream = match build_playback(&output_name, handler.clone(), effects.clone(), &log) {
+        // ストリームのエラーコールバックから再作成を依頼するためのチャネル
+        let err_tx = cmd_tx;
+        let build_out = |output_name: &Option<String>| {
+            build_playback(output_name, handler.clone(), effects.clone(), err_tx.clone(), &log)
+        };
+        let build_in = |input_name: &Option<String>| {
+            build_capture(input_name, controls.clone(), packet_tx.clone(), err_tx.clone(), &log)
+        };
+
+        let mut out_stream = match build_out(&output_name) {
             Ok(s) => Some(s),
             Err(e) => {
                 log(format!("再生デバイスの初期化に失敗: {e:#}"));
                 None
             }
         };
-        let mut in_stream =
-            match build_capture(&input_name, controls.clone(), packet_tx.clone(), &log) {
-                Ok(s) => Some(s),
-                Err(e) => {
-                    log(format!("録音デバイスの初期化に失敗: {e:#}"));
-                    None
-                }
-            };
+        let mut in_stream = match build_in(&input_name) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                log(format!("録音デバイスの初期化に失敗: {e:#}"));
+                None
+            }
+        };
 
-        // デバイス変更依頼を待つ(チャネルが閉じたら終了)
+        // 連続エラーで再作成が空回りしないよう、直近の再作成時刻を覚えておく
+        let mut last_in_rebuild = std::time::Instant::now() - std::time::Duration::from_secs(60);
+        let mut last_out_rebuild = last_in_rebuild;
+
+        // デバイス変更・再作成依頼を待つ(チャネルが閉じたら終了)
         while let Ok(cmd) = cmd_rx.recv() {
             match cmd {
                 AudioCommand::SetInputDevice(name) => {
                     input_name = name;
                     drop(in_stream.take()); // 先に既存ストリームを止める
-                    match build_capture(&input_name, controls.clone(), packet_tx.clone(), &log) {
+                    match build_in(&input_name) {
                         Ok(s) => in_stream = Some(s),
                         Err(e) => log(format!("録音デバイスの切替に失敗: {e:#}")),
                     }
@@ -220,9 +236,35 @@ pub fn start(
                 AudioCommand::SetOutputDevice(name) => {
                     output_name = name;
                     drop(out_stream.take());
-                    match build_playback(&output_name, handler.clone(), effects.clone(), &log) {
+                    match build_out(&output_name) {
                         Ok(s) => out_stream = Some(s),
                         Err(e) => log(format!("再生デバイスの切替に失敗: {e:#}")),
+                    }
+                }
+                AudioCommand::RebuildInput => {
+                    if last_in_rebuild.elapsed() < std::time::Duration::from_secs(2) {
+                        continue; // 連続したエラー通知をまとめる
+                    }
+                    log("録音ストリームのエラーを検出、作り直します".to_owned());
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    last_in_rebuild = std::time::Instant::now();
+                    drop(in_stream.take());
+                    match build_in(&input_name) {
+                        Ok(s) => in_stream = Some(s),
+                        Err(e) => log(format!("録音ストリームの再作成に失敗: {e:#} (音声設定からデバイスを選び直してください)")),
+                    }
+                }
+                AudioCommand::RebuildOutput => {
+                    if last_out_rebuild.elapsed() < std::time::Duration::from_secs(2) {
+                        continue;
+                    }
+                    log("再生ストリームのエラーを検出、作り直します".to_owned());
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    last_out_rebuild = std::time::Instant::now();
+                    drop(out_stream.take());
+                    match build_out(&output_name) {
+                        Ok(s) => out_stream = Some(s),
+                        Err(e) => log(format!("再生ストリームの再作成に失敗: {e:#} (音声設定からデバイスを選び直してください)")),
                     }
                 }
             }
@@ -257,6 +299,7 @@ fn build_playback(
     name: &Option<String>,
     handler: Arc<Mutex<AudioHandler>>,
     effects: EffectsQueue,
+    err_tx: std::sync::mpsc::Sender<AudioCommand>,
     log: &impl Fn(String),
 ) -> Result<cpal::Stream> {
     let device = find_device(name, false, log)?;
@@ -328,7 +371,10 @@ fn build_playback(
                 src.drain(..consumed * 2);
                 pos -= consumed as f64;
             },
-            |e| tracing::error!("再生ストリームエラー: {e}"),
+            move |e| {
+                tracing::error!("再生ストリームエラー: {e}");
+                let _ = err_tx.send(AudioCommand::RebuildOutput);
+            },
             None,
         )
         .context("再生ストリームの作成に失敗")?;
@@ -341,6 +387,7 @@ fn build_capture(
     name: &Option<String>,
     controls: Arc<Controls>,
     packet_tx: tokio::sync::mpsc::Sender<OutPacket>,
+    err_tx: std::sync::mpsc::Sender<AudioCommand>,
     log: &impl Fn(String),
 ) -> Result<cpal::Stream> {
     let device = find_device(name, true, log)?;
@@ -433,7 +480,10 @@ fn build_capture(
                     frame_buf.drain(..FRAME_SAMPLES);
                 }
             },
-            |e| tracing::error!("録音ストリームエラー: {e}"),
+            move |e| {
+                tracing::error!("録音ストリームエラー: {e}");
+                let _ = err_tx.send(AudioCommand::RebuildInput);
+            },
             None,
         )
         .context("録音ストリームの作成に失敗")?;

@@ -22,6 +22,17 @@ pub fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// ロックを試み、他スレッドが保持中ならNoneを返す(毒化は無視して取得)。
+/// 音声コールバックスレッドがデバイス障害でロックを持ったままハングしても、
+/// 呼び出し側(接続ワーカーやUI)を巻き込んで凍結させないために使う。
+pub fn try_lock<T>(mutex: &std::sync::Mutex<T>) -> Option<std::sync::MutexGuard<'_, T>> {
+    match mutex.try_lock() {
+        Ok(guard) => Some(guard),
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+        Err(std::sync::TryLockError::WouldBlock) => None,
+    }
+}
+
 /// コンソールとログファイル(%APPDATA%\ts3-client\ts3-client.log)の両方へ出力する
 fn init_logging() {
     use std::io::Write;
@@ -457,14 +468,15 @@ impl App {
             self.config.volumes.insert(change.name.clone(), change.volume);
             lock(&self.handle.volumes).insert(change.name.clone(), change.volume);
         }
-        // 再生中(発話中)なら即時反映
-        let mut handler = lock(&self.handle.audio_handler);
-        if let Some(queue) =
-            handler.get_mut_queues().get_mut(&tsclientlib::ClientId(change.client_id))
-        {
-            queue.volume = change.volume;
+        // 再生中(発話中)なら即時反映。音声スレッドが混み合っていたら待たない
+        // (保存済み音量は次の発話開始時に適用される)
+        if let Some(mut handler) = try_lock(&self.handle.audio_handler) {
+            if let Some(queue) =
+                handler.get_mut_queues().get_mut(&tsclientlib::ClientId(change.client_id))
+            {
+                queue.volume = change.volume;
+            }
         }
-        drop(handler);
         if change.save {
             self.config.save();
         }

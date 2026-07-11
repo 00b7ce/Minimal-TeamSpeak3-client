@@ -213,7 +213,10 @@ async fn run_worker(
                         &tx,
                     )
                     .await;
-                    crate::lock(&audio_handler).reset();
+                    // 音声スレッドがハングしていても待たない(キューは自然に破棄される)
+                    if let Some(mut handler) = crate::try_lock(&audio_handler) {
+                        handler.reset();
+                    }
                     tx.send(Update::Snapshot(Vec::new()));
                     end
                 }
@@ -342,7 +345,12 @@ async fn connected_loop(
                     }
                     _ => continue,
                 };
-                match crate::lock(audio_handler).handle_packet(from, packet) {
+                // 音声スレッドがロック保持中(最悪、デバイス障害でハング中)でも
+                // ワーカーは絶対に待たない。取れなければこの20ms分は捨てる
+                let Some(mut handler) = crate::try_lock(audio_handler) else {
+                    continue;
+                };
+                match handler.handle_packet(from, packet) {
                     // 新しく話し始めた相手: 保存済みの音量をキューに適用する
                     Ok(Some(new_talker)) => {
                         let name = con
@@ -352,7 +360,6 @@ async fn connected_loop(
                         if let Some(volume) =
                             name.and_then(|n| crate::lock(volumes).get(&n).copied())
                         {
-                            let mut handler = crate::lock(audio_handler);
                             if let Some(queue) = handler.get_mut_queues().get_mut(&new_talker) {
                                 queue.volume = volume;
                             }
