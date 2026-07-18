@@ -172,7 +172,9 @@ fn setup_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 
     // デバッグビルドでeguiが出す「ピクセル境界ずれ」の赤枠警告を無効化する
-    // (パネルの出現アニメーション中に一瞬表示されて紛らわしいため)
+    // (パネルの出現アニメーション中に一瞬表示されて紛らわしいため)。
+    // Style::debugフィールド自体がデバッグビルド限定のためcfgで囲む
+    #[cfg(debug_assertions)]
     ctx.all_styles_mut(|style| style.debug.show_unaligned = false);
 }
 
