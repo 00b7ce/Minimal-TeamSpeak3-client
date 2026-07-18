@@ -98,11 +98,7 @@ impl Config {
     /// 旧形式からの移行と不正値の補正
     fn normalize(mut self) -> Self {
         if self.profiles.is_empty() {
-            let nickname = if self.nickname.is_empty() {
-                "mekabu".to_owned()
-            } else {
-                std::mem::take(&mut self.nickname)
-            };
+            let nickname = std::mem::take(&mut self.nickname);
             if !self.servers.is_empty() {
                 // 旧形式: [[servers]] + グローバルnickname
                 self.profiles = self
@@ -112,10 +108,10 @@ impl Config {
                     .collect();
                 self.selected_profile = self.selected_server;
             } else {
-                // さらに旧い形式(単一address)または初回起動
-                let address =
-                    self.address.take().unwrap_or_else(|| "192.168.10.8".to_owned());
-                self.profiles.push(Profile { name: "自宅サーバ".to_owned(), address, nickname });
+                // さらに旧い形式(単一address)または初回起動。
+                // 初回は空のプロファイルを作り、ユーザーが設定画面で埋める
+                let address = self.address.take().unwrap_or_default();
+                self.profiles.push(Profile { name: "Profile1".to_owned(), address, nickname });
             }
         }
         if self.selected_profile >= self.profiles.len() {

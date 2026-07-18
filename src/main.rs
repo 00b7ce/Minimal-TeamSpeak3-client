@@ -599,12 +599,25 @@ impl eframe::App for App {
                     if ui.button("切断").clicked() {
                         let _ = self.handle.commands.send(Command::Disconnect);
                     }
-                } else if ui.button("接続").clicked() {
-                    self.config.save();
-                    let _ = self.handle.commands.send(Command::Connect {
-                        address: self.config.selected().address.trim().to_owned(),
-                        nickname: self.config.selected().nickname.trim().to_owned(),
-                    });
+                } else {
+                    let profile = self.config.selected();
+                    let ready = !profile.address.trim().is_empty()
+                        && !profile.nickname.trim().is_empty();
+                    let button = ui.add_enabled(ready, egui::Button::new("接続"));
+                    let button = if ready {
+                        button
+                    } else {
+                        button.on_disabled_hover_text(
+                            "設定でプロファイルのアドレスとニックネームを入力してください",
+                        )
+                    };
+                    if button.clicked() {
+                        self.config.save();
+                        let _ = self.handle.commands.send(Command::Connect {
+                            address: self.config.selected().address.trim().to_owned(),
+                            nickname: self.config.selected().nickname.trim().to_owned(),
+                        });
+                    }
                 }
                 let muted_flag = &self.handle.audio_controls.muted;
                 let mut muted = muted_flag.load(Ordering::Relaxed);

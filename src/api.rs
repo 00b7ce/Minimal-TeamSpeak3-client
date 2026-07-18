@@ -51,16 +51,30 @@ pub async fn serve(port: u16, state: Arc<ApiState>) {
     }
 }
 
-async fn connect(State(state): State<Arc<ApiState>>) -> &'static str {
+async fn connect(State(state): State<Arc<ApiState>>) -> Result<&'static str, StatusCode> {
     // プロファイルはUIが保存した最新の設定ファイルから読む
     let cfg = crate::config::Config::load();
-    let profile = cfg.selected();
+    request_connect(&state, cfg.selected())
+}
+
+/// プロファイルの内容を確認して接続要求を送る
+fn request_connect(
+    state: &ApiState,
+    profile: &crate::config::Profile,
+) -> Result<&'static str, StatusCode> {
+    if profile.address.trim().is_empty() || profile.nickname.trim().is_empty() {
+        (state.log)(format!(
+            "API: プロファイル「{}」はアドレスまたはニックネームが未設定です",
+            profile.name
+        ));
+        return Err(StatusCode::BAD_REQUEST);
+    }
     (state.log)(format!("API: 接続要求 ({})", profile.name));
     let _ = state.commands.send(Command::Connect {
         address: profile.address.trim().to_owned(),
         nickname: profile.nickname.trim().to_owned(),
     });
-    "connecting\n"
+    Ok("connecting\n")
 }
 
 async fn connect_named(
@@ -72,12 +86,7 @@ async fn connect_named(
         (state.log)(format!("API: 未登録のプロファイル名「{name}」への接続要求"));
         return Err(StatusCode::NOT_FOUND);
     };
-    (state.log)(format!("API: 接続要求 ({})", profile.name));
-    let _ = state.commands.send(Command::Connect {
-        address: profile.address.trim().to_owned(),
-        nickname: profile.nickname.trim().to_owned(),
-    });
-    Ok("connecting\n")
+    request_connect(&state, profile)
 }
 
 async fn disconnect(State(state): State<Arc<ApiState>>) -> &'static str {
