@@ -114,10 +114,14 @@ pub type EffectsQueue = Arc<Mutex<std::collections::VecDeque<f32>>>;
 
 #[derive(Debug, Clone, Copy)]
 pub enum SoundEffect {
-    /// 接続完了(上昇2音)
+    /// 自分の接続完了(上昇2音)
     Connect,
-    /// 切断(下降2音)
+    /// 自分の切断(下降2音)
     Disconnect,
+    /// 他ユーザーの入室(高い単音)
+    UserJoined,
+    /// 他ユーザーの退室(低い単音)
+    UserLeft,
 }
 
 /// 効果音を再生キューへ積む。接続ワーカーから呼ばれるため待たない
@@ -126,6 +130,8 @@ pub fn queue_effect(queue: &EffectsQueue, effect: SoundEffect) {
     let notes: &[f32] = match effect {
         SoundEffect::Connect => &[523.25, 783.99],  // C5 → G5
         SoundEffect::Disconnect => &[783.99, 523.25], // G5 → C5
+        SoundEffect::UserJoined => &[659.25],         // E5
+        SoundEffect::UserLeft => &[329.63],           // E4
     };
     let Some(mut queue) = crate::try_lock(queue) else { return };
     // 再生が止まっている場合の無限成長を防ぐ(5秒分で頭打ち)

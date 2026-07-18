@@ -152,6 +152,11 @@ impl Sender {
     fn log(&self, message: impl Into<String>) {
         self.send(Update::Log(message.into()));
     }
+
+    fn play(&self, effect: audio::SoundEffect) {
+        tracing::info!("効果音: {effect:?}");
+        audio::queue_effect(&self.effects, effect);
+    }
 }
 
 /// ハンドシェイク(接続開始から最初の状態同期まで)の上限
@@ -295,6 +300,10 @@ async fn connected_loop(
     tx: &Sender,
 ) -> LoopEnd {
     let mut established = false;
+    // 接続確立直後は初期同期(既存ユーザーのAddedイベント)が複数バッチに
+    // 分かれて届くため、この時刻から一定時間は入退室の通知音を抑制する
+    let mut established_at: Option<std::time::Instant> = None;
+    const JOIN_SOUND_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
     let handshake_deadline = tokio::time::Instant::now() + HANDSHAKE_TIMEOUT;
     loop {
         enum Step {
@@ -373,8 +382,35 @@ async fn connected_loop(
                 for event in &events {
                     tx.log(format!("{event:?}"));
                 }
+                // 他ユーザーの入退室で通知音を鳴らす(初期同期の間は抑制)
+                let grace_over =
+                    established_at.is_some_and(|at| at.elapsed() > JOIN_SOUND_GRACE);
+                if grace_over {
+                    use tsclientlib::events::{Event, PropertyId};
+                    // 同一バッチに複数人の入退室があっても音は各1回
+                    let mut joined = false;
+                    let mut left = false;
+                    for event in &events {
+                        match event {
+                            Event::PropertyAdded { id: PropertyId::Client(_), .. } => {
+                                joined = true;
+                            }
+                            Event::PropertyRemoved { id: PropertyId::Client(_), .. } => {
+                                left = true;
+                            }
+                            _ => {}
+                        }
+                    }
+                    if joined {
+                        tx.play(audio::SoundEffect::UserJoined);
+                    }
+                    if left {
+                        tx.play(audio::SoundEffect::UserLeft);
+                    }
+                }
                 if let Ok(state) = con.get_state() {
                     established = true;
+                    established_at.get_or_insert_with(std::time::Instant::now);
                     tx.send(Update::Status(Status::Connected {
                         server_name: state.server.name.clone(),
                     }));
