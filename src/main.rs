@@ -215,7 +215,7 @@ impl App {
         if std::env::args().any(|a| a == "--autoconnect") {
             let _ = app.handle.commands.send(Command::Connect {
                 address: app.config.selected().address.clone(),
-                nickname: app.config.nickname.clone(),
+                nickname: app.config.selected().nickname.clone(),
             });
         }
         app
@@ -381,56 +381,83 @@ impl App {
         }
     }
 
-    fn server_settings_ui(&mut self, ui: &mut egui::Ui) {
+    /// 全プロファイルを一覧表示し、その場で編集/追加/削除する
+    /// (メインウィンドウの選択状態とは独立して動作する)
+    fn profile_settings_ui(&mut self, ui: &mut egui::Ui) {
         let mut save = false;
-        let i = self.config.selected_server;
+        let mut delete: Option<usize> = None;
 
-        ui.horizontal(|ui| {
-            ui.label("表示名:");
-            if ui
-                .add(
-                    egui::TextEdit::singleline(&mut self.config.servers[i].name)
-                        .desired_width(140.0),
-                )
-                .lost_focus()
-            {
-                save = true;
-            }
-            ui.label("アドレス:");
-            if ui
-                .add(
-                    egui::TextEdit::singleline(&mut self.config.servers[i].address)
-                        .desired_width(140.0),
-                )
-                .lost_focus()
-            {
-                save = true;
-            }
-        });
-        ui.horizontal(|ui| {
-            if ui.button("サーバを追加").clicked() {
-                self.config
-                    .servers
-                    .push(config::ServerEntry {
-                        name: format!("サーバ{}", self.config.servers.len() + 1),
-                        address: String::new(),
-                    });
-                self.config.selected_server = self.config.servers.len() - 1;
-                save = true;
-            }
-            // 最後の1件は消せない(接続先が空になるのを防ぐ)
-            if ui
-                .add_enabled(self.config.servers.len() > 1, egui::Button::new("このサーバを削除"))
-                .clicked()
-            {
-                self.config.servers.remove(i);
-                if self.config.selected_server >= self.config.servers.len() {
-                    self.config.selected_server = self.config.servers.len() - 1;
+        egui::Grid::new("profiles_grid").num_columns(4).spacing([8.0, 4.0]).show(ui, |ui| {
+            ui.strong("プロファイル名");
+            ui.strong("アドレス");
+            ui.strong("ニックネーム");
+            ui.label("");
+            ui.end_row();
+
+            let count = self.config.profiles.len();
+            let row_height = ui.spacing().interact_size.y;
+            for (i, profile) in self.config.profiles.iter_mut().enumerate() {
+                // Gridセル内ではdesired_widthが無視されるため、add_sizedで幅を確保する
+                if ui
+                    .add_sized([130.0, row_height], egui::TextEdit::singleline(&mut profile.name))
+                    .lost_focus()
+                {
+                    save = true;
                 }
-                save = true;
+                if ui
+                    .add_sized(
+                        [220.0, row_height],
+                        egui::TextEdit::singleline(&mut profile.address),
+                    )
+                    .lost_focus()
+                {
+                    save = true;
+                }
+                if ui
+                    .add_sized(
+                        [110.0, row_height],
+                        egui::TextEdit::singleline(&mut profile.nickname),
+                    )
+                    .lost_focus()
+                {
+                    save = true;
+                }
+                // 最後の1件は消せない(接続先が空になるのを防ぐ)
+                if ui
+                    .add_enabled(count > 1, egui::Button::new("－"))
+                    .on_hover_text("このプロファイルを削除")
+                    .clicked()
+                {
+                    delete = Some(i);
+                }
+                ui.end_row();
             }
         });
-        ui.weak("StreamDeckから名前指定で接続: /api/connect/表示名");
+
+        if ui.button("＋").on_hover_text("プロファイルを追加").clicked() {
+            // ニックネームは使い回すことが多いので直前の値を引き継ぐ
+            let nickname =
+                self.config.profiles.last().map(|p| p.nickname.clone()).unwrap_or_default();
+            self.config.profiles.push(config::Profile {
+                name: format!("Profile{}", self.config.profiles.len() + 1),
+                address: String::new(),
+                nickname,
+            });
+            save = true;
+        }
+
+        if let Some(i) = delete {
+            self.config.profiles.remove(i);
+            // メインウィンドウの選択位置がずれないよう補正する
+            if i < self.config.selected_profile {
+                self.config.selected_profile -= 1;
+            } else if self.config.selected_profile >= self.config.profiles.len() {
+                self.config.selected_profile = self.config.profiles.len() - 1;
+            }
+            save = true;
+        }
+
+        ui.weak("StreamDeckから名前指定で接続: /api/connect/プロファイル名");
 
         if save {
             self.config.save();
@@ -495,15 +522,15 @@ impl App {
             egui::ViewportId::from_hash_of("settings_window"),
             egui::ViewportBuilder::default()
                 .with_title("設定 - TS3 Client")
-                .with_inner_size([400.0, 520.0]),
+                .with_inner_size([560.0, 330.0]),
             |ui, _class| {
                 if ui.ctx().input(|i| i.viewport().close_requested()) {
                     open = false;
                 }
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     ui.add_space(8.0);
-                    ui.heading("サーバ設定");
-                    self.server_settings_ui(ui);
+                    ui.heading("プロファイル設定");
+                    self.profile_settings_ui(ui);
                     ui.add_space(8.0);
                     ui.separator();
                     ui.heading("音声設定");
@@ -545,36 +572,26 @@ impl eframe::App for App {
             ui.add_space(4.0);
             let connected = !matches!(self.status, Status::Disconnected | Status::Error(_));
             ui.horizontal(|ui| {
-                ui.label("サーバ:");
+                ui.label("プロファイル:");
                 ui.add_enabled_ui(!connected, |ui| {
                     let selected_name = self.config.selected().name.clone();
-                    egui::ComboBox::from_id_salt("server_select")
+                    egui::ComboBox::from_id_salt("profile_select")
                         .selected_text(selected_name)
-                        .width(160.0)
+                        .width(180.0)
                         .show_ui(ui, |ui| {
-                            for i in 0..self.config.servers.len() {
-                                let is_selected = i == self.config.selected_server;
+                            for i in 0..self.config.profiles.len() {
+                                let is_selected = i == self.config.selected_profile;
                                 if ui
-                                    .selectable_label(is_selected, &self.config.servers[i].name)
+                                    .selectable_label(is_selected, &self.config.profiles[i].name)
                                     .clicked()
                                     && !is_selected
                                 {
-                                    self.config.selected_server = i;
+                                    self.config.selected_profile = i;
                                     self.config.save();
                                 }
                             }
                         });
                 });
-                ui.label("名前:");
-                if ui
-                    .add_enabled(
-                        !connected,
-                        egui::TextEdit::singleline(&mut self.config.nickname).desired_width(80.0),
-                    )
-                    .lost_focus()
-                {
-                    self.config.save();
-                }
             });
             ui.add_space(4.0);
             ui.horizontal(|ui| {
@@ -586,7 +603,7 @@ impl eframe::App for App {
                     self.config.save();
                     let _ = self.handle.commands.send(Command::Connect {
                         address: self.config.selected().address.trim().to_owned(),
-                        nickname: self.config.nickname.trim().to_owned(),
+                        nickname: self.config.selected().nickname.trim().to_owned(),
                     });
                 }
                 let muted_flag = &self.handle.audio_controls.muted;

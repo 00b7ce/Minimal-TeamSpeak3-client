@@ -52,13 +52,13 @@ pub async fn serve(port: u16, state: Arc<ApiState>) {
 }
 
 async fn connect(State(state): State<Arc<ApiState>>) -> &'static str {
-    // サーバ/ニックネームはUIが保存した最新の設定ファイルから読む
+    // プロファイルはUIが保存した最新の設定ファイルから読む
     let cfg = crate::config::Config::load();
-    let server = cfg.selected();
-    (state.log)(format!("API: 接続要求 ({})", server.name));
+    let profile = cfg.selected();
+    (state.log)(format!("API: 接続要求 ({})", profile.name));
     let _ = state.commands.send(Command::Connect {
-        address: server.address.trim().to_owned(),
-        nickname: cfg.nickname.trim().to_owned(),
+        address: profile.address.trim().to_owned(),
+        nickname: profile.nickname.trim().to_owned(),
     });
     "connecting\n"
 }
@@ -68,14 +68,14 @@ async fn connect_named(
     Path(name): Path<String>,
 ) -> Result<&'static str, StatusCode> {
     let cfg = crate::config::Config::load();
-    let Some(server) = cfg.servers.iter().find(|s| s.name == name) else {
-        (state.log)(format!("API: 未登録のサーバ名「{name}」への接続要求"));
+    let Some(profile) = cfg.profiles.iter().find(|p| p.name == name) else {
+        (state.log)(format!("API: 未登録のプロファイル名「{name}」への接続要求"));
         return Err(StatusCode::NOT_FOUND);
     };
-    (state.log)(format!("API: 接続要求 ({})", server.name));
+    (state.log)(format!("API: 接続要求 ({})", profile.name));
     let _ = state.commands.send(Command::Connect {
-        address: server.address.trim().to_owned(),
-        nickname: cfg.nickname.trim().to_owned(),
+        address: profile.address.trim().to_owned(),
+        nickname: profile.nickname.trim().to_owned(),
     });
     Ok("connecting\n")
 }

@@ -7,22 +7,39 @@ use serde::{Deserialize, Serialize};
 
 use crate::audio::VoiceMode;
 
+/// 接続先プロファイル(サーバとニックネームの組)
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServerEntry {
+pub struct Profile {
     /// UI・APIで指定する表示名
     pub name: String,
     pub address: String,
+    pub nickname: String,
+}
+
+/// 旧形式(servers + グローバルnickname)の読み込み用
+#[derive(Debug, Clone, Deserialize)]
+struct LegacyServerEntry {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    address: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    pub servers: Vec<ServerEntry>,
-    pub selected_server: usize,
-    /// 旧形式(単一アドレス)からの移行用。読み込み時のみ使用し、保存しない
+    pub profiles: Vec<Profile>,
+    pub selected_profile: usize,
+    // ---- 以下3つは旧形式からの移行用。読み込み時のみ使用し、保存しない ----
+    #[serde(skip_serializing)]
+    servers: Vec<LegacyServerEntry>,
+    #[serde(skip_serializing)]
+    selected_server: usize,
+    #[serde(skip_serializing)]
+    nickname: String,
     #[serde(skip_serializing)]
     address: Option<String>,
-    pub nickname: String,
+    // ----
     /// Noneは「既定のデバイス」
     pub input_device: Option<String>,
     pub output_device: Option<String>,
@@ -42,13 +59,13 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            servers: vec![ServerEntry {
-                name: "自宅サーバ".to_owned(),
-                address: "192.168.10.8".to_owned(),
-            }],
+            // 空のままにしておき、normalize()が移行または初期プロファイル作成を行う
+            profiles: Vec::new(),
+            selected_profile: 0,
+            servers: Vec::new(),
             selected_server: 0,
+            nickname: String::new(),
             address: None,
-            nickname: "mekabu".to_owned(),
             input_device: None,
             output_device: None,
             voice_mode: VoiceMode::Always,
@@ -80,20 +97,36 @@ impl Config {
 
     /// 旧形式からの移行と不正値の補正
     fn normalize(mut self) -> Self {
-        if self.servers.is_empty() {
-            let address =
-                self.address.take().unwrap_or_else(|| "192.168.10.8".to_owned());
-            self.servers.push(ServerEntry { name: "サーバ1".to_owned(), address });
+        if self.profiles.is_empty() {
+            let nickname = if self.nickname.is_empty() {
+                "mekabu".to_owned()
+            } else {
+                std::mem::take(&mut self.nickname)
+            };
+            if !self.servers.is_empty() {
+                // 旧形式: [[servers]] + グローバルnickname
+                self.profiles = self
+                    .servers
+                    .drain(..)
+                    .map(|s| Profile { name: s.name, address: s.address, nickname: nickname.clone() })
+                    .collect();
+                self.selected_profile = self.selected_server;
+            } else {
+                // さらに旧い形式(単一address)または初回起動
+                let address =
+                    self.address.take().unwrap_or_else(|| "192.168.10.8".to_owned());
+                self.profiles.push(Profile { name: "自宅サーバ".to_owned(), address, nickname });
+            }
         }
-        if self.selected_server >= self.servers.len() {
-            self.selected_server = 0;
+        if self.selected_profile >= self.profiles.len() {
+            self.selected_profile = 0;
         }
         self
     }
 
-    /// 現在選択中のサーバ(serversは常に1件以上ある)
-    pub fn selected(&self) -> &ServerEntry {
-        &self.servers[self.selected_server.min(self.servers.len() - 1)]
+    /// 現在選択中のプロファイル(profilesは常に1件以上ある)
+    pub fn selected(&self) -> &Profile {
+        &self.profiles[self.selected_profile.min(self.profiles.len() - 1)]
     }
 
     pub fn save(&self) {
