@@ -1,0 +1,45 @@
+# vX.Y.Z形式のタグをpushすると、Windows向けリリースビルドを作成して
+# GitHub Releasesにzipを添付する
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # cmake(libopusのビルドに必要)はwindows-latestにプリインストール済み。
+      # CMake 4系の互換設定は .cargo/config.toml が適用される
+      - name: Build
+        run: cargo build --release
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}"
+          New-Item -ItemType Directory dist | Out-Null
+          Copy-Item target/release/ts3-client.exe dist/
+          Copy-Item README.md, README.ja.md, LICENSE-MIT, LICENSE-APACHE dist/
+          # フォントはexeに埋め込み済みだが、OFLライセンス文書は配布物に同梱する
+          Copy-Item assets/OFL-Inter.txt, assets/OFL-NotoSansJP.txt dist/
+          Compress-Archive -Path dist/* -DestinationPath "ts3-client-$version-windows-x64.zip"
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ts3-client-*-windows-x64.zip
+          generate_release_notes: true
