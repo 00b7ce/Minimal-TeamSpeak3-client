@@ -58,8 +58,9 @@ pub fn spawn(ctx: egui::Context, exiting: Arc<AtomicBool>) {
     // トレイアイコン本体+メッセージポンプ
     std::thread::spawn(move || {
         let menu = Menu::new();
-        let _ = menu.append(&MenuItem::with_id("open", "開く", true, None));
-        let _ = menu.append(&MenuItem::with_id("exit", "終了", true, None));
+        let t = crate::i18n::t();
+        let _ = menu.append(&MenuItem::with_id("open", t.tray_open, true, None));
+        let _ = menu.append(&MenuItem::with_id("exit", t.tray_exit, true, None));
 
         let _tray = match TrayIconBuilder::new()
             .with_menu(Box::new(menu))

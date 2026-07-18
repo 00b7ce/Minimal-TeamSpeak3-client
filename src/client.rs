@@ -15,6 +15,7 @@ use tsclientlib::{ClientId, Connection, DisconnectOptions, StreamItem};
 use tsproto_packets::packets::{AudioData, OutPacket};
 
 use crate::audio;
+use crate::i18n::{fmt, t};
 
 #[derive(Debug)]
 pub enum Command {
@@ -203,7 +204,7 @@ async fn run_worker(
         let mut attempts: u32 = 0;
         loop {
             tx.send(Update::Status(Status::Connecting));
-            tx.log(format!("{address} に {nickname} として接続します"));
+            tx.log(fmt(t().connecting_to, &[&address, &nickname]));
 
             let end = match Connection::build(address.clone()).name(nickname.clone()).connect() {
                 Ok(mut con) => {
@@ -248,22 +249,24 @@ async fn run_worker(
                     }
                     attempts += 1;
                     if attempts > MAX_RECONNECT_ATTEMPTS {
-                        tx.send(Update::Status(Status::Error(format!(
-                            "再接続を{MAX_RECONNECT_ATTEMPTS}回試みましたが失敗しました"
+                        tx.send(Update::Status(Status::Error(fmt(
+                            t().reconnect_giveup,
+                            &[&MAX_RECONNECT_ATTEMPTS.to_string()],
                         ))));
                         continue 'idle;
                     }
-                    tx.log(format!(
-                        "{}秒後に再接続します ({attempts}/{MAX_RECONNECT_ATTEMPTS})",
-                        RECONNECT_INTERVAL.as_secs()
-                    ));
+                    tx.log(fmt(t().reconnect_in, &[
+                        &RECONNECT_INTERVAL.as_secs().to_string(),
+                        &attempts.to_string(),
+                        &MAX_RECONNECT_ATTEMPTS.to_string(),
+                    ]));
                     tx.send(Update::Status(Status::Connecting));
                     // 待機中もコマンドは受け付ける
                     match tokio::time::timeout(RECONNECT_INTERVAL, cmd_rx.recv()).await {
                         Err(_) => {} // 時間切れ → 再接続へ
                         Ok(None) => return,
                         Ok(Some(Command::Disconnect)) => {
-                            tx.log("再接続を中止します");
+                            tx.log(t().reconnect_cancel);
                             tx.send(Update::Status(Status::Disconnected));
                             continue 'idle;
                         }
@@ -323,29 +326,29 @@ async fn connected_loop(
 
         match step {
             Step::HandshakeTimeout => {
-                tx.log("接続タイムアウト: サーバからの応答がありません");
-                tx.send(Update::Status(Status::Error("接続タイムアウト".to_owned())));
+                tx.log(t().handshake_timeout_log);
+                tx.send(Update::Status(Status::Error(t().handshake_timeout_status.to_owned())));
                 drain_connection(con).await;
                 return LoopEnd::Lost { established: false };
             }
             Step::Cmd(Some(Command::Connect { .. })) => {
-                tx.log("すでに接続中です。先に切断してください");
+                tx.log(t().already_connected);
             }
             // Disconnect指示、またはUI終了(チャネル切断)なら正規に切断する
             Step::Cmd(cmd) => {
                 let ui_closed = cmd.is_none();
-                tx.log("切断します");
+                tx.log(t().disconnecting);
                 drain_connection(con).await;
-                tx.log("切断しました");
+                tx.log(t().disconnected_done);
                 return if ui_closed { LoopEnd::UiClosed } else { LoopEnd::UserDisconnect };
             }
             Step::AudioOut(Some(packet)) => {
                 if let Err(e) = con.send_audio(packet) {
-                    tx.log(format!("音声送信エラー: {e}"));
+                    tx.log(fmt(t().send_audio_error, &[&e.to_string()]));
                 }
             }
             Step::AudioOut(None) => {
-                tx.log("音声キャプチャが停止しました");
+                tx.log(t().capture_stopped);
             }
             Step::Event(Some(Ok(StreamItem::Audio(packet)))) => {
                 let from = match packet.data().data() {
@@ -424,8 +427,8 @@ async fn connected_loop(
                 return LoopEnd::Lost { established };
             }
             Step::Event(None) => {
-                tx.log("サーバから切断されました");
-                tx.send(Update::Status(Status::Error("接続が失われました".to_owned())));
+                tx.log(t().server_closed);
+                tx.send(Update::Status(Status::Error(t().connection_lost.to_owned())));
                 return LoopEnd::Lost { established };
             }
         }

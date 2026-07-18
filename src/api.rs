@@ -22,6 +22,7 @@ use serde::Serialize;
 
 use crate::audio::Controls;
 use crate::client::{Command, Status};
+use crate::i18n::{fmt, t};
 
 pub struct ApiState {
     pub commands: tokio::sync::mpsc::UnboundedSender<Command>,
@@ -42,12 +43,14 @@ pub async fn serve(port: u16, state: Arc<ApiState>) {
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     match tokio::net::TcpListener::bind(addr).await {
         Ok(listener) => {
-            (state.log)(format!("StreamDeck用API待受中: http://127.0.0.1:{port}/api/"));
+            (state.log)(fmt(t().api_listening, &[&format!("http://127.0.0.1:{port}/api/")]));
             if let Err(e) = axum::serve(listener, router).await {
-                (state.log)(format!("APIサーバエラー: {e}"));
+                (state.log)(fmt(t().api_error, &[&e.to_string()]));
             }
         }
-        Err(e) => (state.log)(format!("APIサーバの起動に失敗 (ポート{port}): {e}")),
+        Err(e) => {
+            (state.log)(fmt(t().api_bind_failed, &[&port.to_string(), &e.to_string()]));
+        }
     }
 }
 
@@ -63,13 +66,10 @@ fn request_connect(
     profile: &crate::config::Profile,
 ) -> Result<&'static str, StatusCode> {
     if profile.address.trim().is_empty() || profile.nickname.trim().is_empty() {
-        (state.log)(format!(
-            "API: プロファイル「{}」はアドレスまたはニックネームが未設定です",
-            profile.name
-        ));
+        (state.log)(fmt(t().api_profile_incomplete, &[&profile.name]));
         return Err(StatusCode::BAD_REQUEST);
     }
-    (state.log)(format!("API: 接続要求 ({})", profile.name));
+    (state.log)(fmt(t().api_connect_req, &[&profile.name]));
     let _ = state.commands.send(Command::Connect {
         address: profile.address.trim().to_owned(),
         nickname: profile.nickname.trim().to_owned(),
@@ -83,14 +83,14 @@ async fn connect_named(
 ) -> Result<&'static str, StatusCode> {
     let cfg = crate::config::Config::load();
     let Some(profile) = cfg.profiles.iter().find(|p| p.name == name) else {
-        (state.log)(format!("API: 未登録のプロファイル名「{name}」への接続要求"));
+        (state.log)(fmt(t().api_unknown_profile, &[&name]));
         return Err(StatusCode::NOT_FOUND);
     };
     request_connect(&state, profile)
 }
 
 async fn disconnect(State(state): State<Arc<ApiState>>) -> &'static str {
-    (state.log)("API: 切断要求".to_owned());
+    (state.log)(t().api_disconnect_req.to_owned());
     let _ = state.commands.send(Command::Disconnect);
     "disconnecting\n"
 }
@@ -109,7 +109,7 @@ async fn mute(
         _ => return Err(StatusCode::NOT_FOUND),
     }
     let now = muted.load(Ordering::Relaxed);
-    (state.log)(format!("API: ミュート {}", if now { "ON" } else { "OFF" }));
+    (state.log)(fmt(t().api_mute, &[if now { "ON" } else { "OFF" }]));
     Ok(format!("muted={now}\n"))
 }
 

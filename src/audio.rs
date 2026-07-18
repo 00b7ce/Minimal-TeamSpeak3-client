@@ -1,4 +1,4 @@
-﻿//! 音声入出力モジュール。
+//! 音声入出力モジュール。
 //!
 //! - 送信: マイク入力 → モノラル化 → 48kHzへ変換 → 送信判定(常時/VAD/PTT)
 //!   → 20msフレームでOpusエンコード → `OutPacket`
@@ -212,14 +212,14 @@ pub fn start(
         let mut out_stream = match build_out(&output_name) {
             Ok(s) => Some(s),
             Err(e) => {
-                log(format!("再生デバイスの初期化に失敗: {e:#}"));
+                log(crate::i18n::fmt(crate::i18n::t().playback_init_failed, &[&format!("{e:#}")]));
                 None
             }
         };
         let mut in_stream = match build_in(&input_name) {
             Ok(s) => Some(s),
             Err(e) => {
-                log(format!("録音デバイスの初期化に失敗: {e:#}"));
+                log(crate::i18n::fmt(crate::i18n::t().capture_init_failed, &[&format!("{e:#}")]));
                 None
             }
         };
@@ -236,7 +236,7 @@ pub fn start(
                     drop(in_stream.take()); // 先に既存ストリームを止める
                     match build_in(&input_name) {
                         Ok(s) => in_stream = Some(s),
-                        Err(e) => log(format!("録音デバイスの切替に失敗: {e:#}")),
+                        Err(e) => log(crate::i18n::fmt(crate::i18n::t().capture_switch_failed, &[&format!("{e:#}")])),
                     }
                 }
                 AudioCommand::SetOutputDevice(name) => {
@@ -244,33 +244,39 @@ pub fn start(
                     drop(out_stream.take());
                     match build_out(&output_name) {
                         Ok(s) => out_stream = Some(s),
-                        Err(e) => log(format!("再生デバイスの切替に失敗: {e:#}")),
+                        Err(e) => log(crate::i18n::fmt(crate::i18n::t().playback_switch_failed, &[&format!("{e:#}")])),
                     }
                 }
                 AudioCommand::RebuildInput => {
                     if last_in_rebuild.elapsed() < std::time::Duration::from_secs(2) {
                         continue; // 連続したエラー通知をまとめる
                     }
-                    log("録音ストリームのエラーを検出、作り直します".to_owned());
+                    log(crate::i18n::t().capture_rebuild.to_owned());
                     std::thread::sleep(std::time::Duration::from_millis(300));
                     last_in_rebuild = std::time::Instant::now();
                     drop(in_stream.take());
                     match build_in(&input_name) {
                         Ok(s) => in_stream = Some(s),
-                        Err(e) => log(format!("録音ストリームの再作成に失敗: {e:#} (音声設定からデバイスを選び直してください)")),
+                        Err(e) => log(crate::i18n::fmt(
+                            crate::i18n::t().capture_rebuild_failed,
+                            &[&format!("{e:#}")],
+                        )),
                     }
                 }
                 AudioCommand::RebuildOutput => {
                     if last_out_rebuild.elapsed() < std::time::Duration::from_secs(2) {
                         continue;
                     }
-                    log("再生ストリームのエラーを検出、作り直します".to_owned());
+                    log(crate::i18n::t().playback_rebuild.to_owned());
                     std::thread::sleep(std::time::Duration::from_millis(300));
                     last_out_rebuild = std::time::Instant::now();
                     drop(out_stream.take());
                     match build_out(&output_name) {
                         Ok(s) => out_stream = Some(s),
-                        Err(e) => log(format!("再生ストリームの再作成に失敗: {e:#} (音声設定からデバイスを選び直してください)")),
+                        Err(e) => log(crate::i18n::fmt(
+                            crate::i18n::t().playback_rebuild_failed,
+                            &[&format!("{e:#}")],
+                        )),
                     }
                 }
             }
@@ -294,11 +300,11 @@ fn find_device(
                 return Ok(device);
             }
         }
-        log(format!("デバイス「{name}」が見つからないため既定のデバイスを使います"));
+        log(crate::i18n::fmt(crate::i18n::t().device_fallback, &[name]));
     }
     let device =
         if is_input { host.default_input_device() } else { host.default_output_device() };
-    device.context("既定のデバイスが見つかりません")
+    device.context("default device not found")
 }
 
 fn build_playback(
@@ -309,9 +315,9 @@ fn build_playback(
     log: &impl Fn(String),
 ) -> Result<cpal::Stream> {
     let device = find_device(name, false, log)?;
-    let default = device.default_output_config().context("既定の出力設定を取得できません")?;
+    let default = device.default_output_config().context("could not query the default output config")?;
     if default.sample_format() != cpal::SampleFormat::F32 {
-        bail!("出力デバイスがf32非対応です: {:?}", default.sample_format());
+        bail!("output device does not support f32 samples: {:?}", default.sample_format());
     }
     let dev_rate = default.sample_rate();
     let dev_channels = default.channels() as usize;
@@ -378,14 +384,18 @@ fn build_playback(
                 pos -= consumed as f64;
             },
             move |e| {
-                tracing::error!("再生ストリームエラー: {e}");
+                tracing::error!("playback stream error: {e}");
                 let _ = err_tx.send(AudioCommand::RebuildOutput);
             },
             None,
         )
-        .context("再生ストリームの作成に失敗")?;
-    stream.play().context("再生ストリームの開始に失敗")?;
-    log(format!("再生デバイス: {} ({dev_rate}Hz {dev_channels}ch)", device_name(&device)));
+        .context("failed to create the playback stream")?;
+    stream.play().context("failed to start the playback stream")?;
+    log(crate::i18n::fmt(crate::i18n::t().playback_device, &[
+        &device_name(&device),
+        &dev_rate.to_string(),
+        &dev_channels.to_string(),
+    ]));
     Ok(stream)
 }
 
@@ -397,9 +407,9 @@ fn build_capture(
     log: &impl Fn(String),
 ) -> Result<cpal::Stream> {
     let device = find_device(name, true, log)?;
-    let default = device.default_input_config().context("既定の入力設定を取得できません")?;
+    let default = device.default_input_config().context("could not query the default input config")?;
     if default.sample_format() != cpal::SampleFormat::F32 {
-        bail!("入力デバイスがf32非対応です: {:?}", default.sample_format());
+        bail!("input device does not support f32 samples: {:?}", default.sample_format());
     }
     let dev_rate = default.sample_rate();
     let dev_channels = default.channels() as usize;
@@ -414,7 +424,7 @@ fn build_capture(
         audiopus::Channels::Mono,
         audiopus::Application::Voip,
     )
-    .context("Opusエンコーダの作成に失敗")?;
+    .context("failed to create the Opus encoder")?;
 
     // 48kHz1サンプルあたりに進めるデバイスレートのサンプル数
     let step = dev_rate as f64 / TS_RATE as f64;
@@ -480,21 +490,25 @@ fn build_capture(
                                 // 未接続時やワーカーが詰まっているときは捨てる
                                 let _ = packet_tx.try_send(packet);
                             }
-                            Err(e) => tracing::error!("Opusエンコードエラー: {e}"),
+                            Err(e) => tracing::error!("opus encode error: {e}"),
                         }
                     }
                     frame_buf.drain(..FRAME_SAMPLES);
                 }
             },
             move |e| {
-                tracing::error!("録音ストリームエラー: {e}");
+                tracing::error!("capture stream error: {e}");
                 let _ = err_tx.send(AudioCommand::RebuildInput);
             },
             None,
         )
-        .context("録音ストリームの作成に失敗")?;
-    stream.play().context("録音ストリームの開始に失敗")?;
-    log(format!("録音デバイス: {} ({dev_rate}Hz {dev_channels}ch)", device_name(&device)));
+        .context("failed to create the capture stream")?;
+    stream.play().context("failed to start the capture stream")?;
+    log(crate::i18n::fmt(crate::i18n::t().capture_device, &[
+        &device_name(&device),
+        &dev_rate.to_string(),
+        &dev_channels.to_string(),
+    ]));
     Ok(stream)
 }
 
@@ -527,5 +541,5 @@ fn device_name(device: &cpal::Device) -> String {
     device
         .description()
         .map(|d| d.name().to_string())
-        .unwrap_or_else(|_| "不明".into())
+        .unwrap_or_else(|_| "unknown".into())
 }

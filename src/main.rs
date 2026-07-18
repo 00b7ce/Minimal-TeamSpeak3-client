@@ -4,6 +4,7 @@ mod api;
 mod audio;
 mod client;
 mod config;
+mod i18n;
 mod tray;
 
 use std::collections::VecDeque;
@@ -15,6 +16,7 @@ use eframe::egui;
 use audio::VoiceMode;
 use client::{ChannelInfo, ClientHandle, Command, Status, Update};
 use config::Config;
+use i18n::{fmt, t};
 
 /// Mutexのロック。パニックで毒化されていても続行する
 /// (音声コールバックスレッドのパニックが他スレッドへ連鎖して全体が止まるのを防ぐ)
@@ -80,11 +82,31 @@ fn init_logging() {
     }));
 }
 
+/// 起動オプションから言語指定を読む: `--lang ja|en` または省略形 `--ja` `--en`
+fn parse_lang_arg() -> Option<i18n::Lang> {
+    let args: Vec<String> = std::env::args().collect();
+    for (i, arg) in args.iter().enumerate() {
+        match arg.as_str() {
+            "--ja" => return Some(i18n::Lang::Ja),
+            "--en" => return Some(i18n::Lang::En),
+            "--lang" => match args.get(i + 1).map(String::as_str) {
+                Some("ja") => return Some(i18n::Lang::Ja),
+                Some("en") => return Some(i18n::Lang::En),
+                other => tracing::warn!("--lang: unknown value {other:?} (expected ja or en)"),
+            },
+            _ => {}
+        }
+    }
+    None
+}
+
 fn main() -> eframe::Result {
     init_logging();
 
     // 自動起動時はトレイに格納された状態(ウィンドウ非表示)で開始する
     let minimized = std::env::args().any(|a| a == "--minimized");
+    // 言語の優先順位: 起動オプション > 設定ファイル > OSの言語設定
+    let lang_override = parse_lang_arg();
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -96,8 +118,8 @@ fn main() -> eframe::Result {
         "TS3 Client",
         options,
         Box::new(move |cc| {
-            setup_japanese_font(&cc.egui_ctx);
-            Ok(Box::new(App::new(cc, minimized)))
+            setup_fonts(&cc.egui_ctx);
+            Ok(Box::new(App::new(cc, minimized, lang_override)))
         }),
     )
 }
@@ -112,45 +134,46 @@ fn build_auto_launch() -> anyhow::Result<auto_launch::AutoLaunch> {
         .build()?)
 }
 
-/// eguiの標準フォントはCJK非対応のため、Windowsのシステムフォントを追加する
-fn setup_japanese_font(ctx: &egui::Context) {
-    let candidates = [
-        "C:/Windows/Fonts/YuGothM.ttc",  // 游ゴシック Medium
-        "C:/Windows/Fonts/meiryo.ttc",   // メイリオ
-        "C:/Windows/Fonts/msgothic.ttc", // MSゴシック
-    ];
-    for path in candidates {
-        if let Ok(bytes) = std::fs::read(path) {
-            let mut fonts = egui::FontDefinitions::default();
-            fonts
-                .font_data
-                .insert("japanese".to_owned(), egui::FontData::from_owned(bytes).into());
-            for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-                fonts
-                    .families
-                    .entry(family)
-                    .or_default()
-                    .push("japanese".to_owned());
-            }
-            ctx.set_fonts(fonts);
-            return;
-        }
-    }
-    eprintln!("警告: 日本語フォントが見つかりませんでした。日本語が□で表示されます");
+/// フォント設定。英数字はInter、日本語はNoto Sans JP(いずれもexeに埋め込み)。
+/// システムフォントに依存しないため、どの環境でも同じ見た目になる
+fn setup_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "inter".to_owned(),
+        egui::FontData::from_static(include_bytes!("../assets/Inter.ttf")).into(),
+    );
+    fonts.font_data.insert(
+        "noto_sans_jp".to_owned(),
+        egui::FontData::from_static(include_bytes!("../assets/NotoSansJP.ttf")).into(),
+    );
+    // Interを最優先、日本語グリフはNoto Sans JPが受け持つ
+    let proportional = fonts.families.entry(egui::FontFamily::Proportional).or_default();
+    proportional.insert(0, "inter".to_owned());
+    proportional.insert(1, "noto_sans_jp".to_owned());
+    // 等幅系は既定フォントを優先しつつ、日本語だけNotoで補完する
+    fonts
+        .families
+        .entry(egui::FontFamily::Monospace)
+        .or_default()
+        .push("noto_sans_jp".to_owned());
+    ctx.set_fonts(fonts);
 }
 
 const MAX_LOG_LINES: usize = 200;
 
-/// プッシュトゥトークに選べるキー (Windows仮想キーコード, 表示名)
-const PTT_KEYS: &[(i32, &str)] = &[
-    (0x05, "マウス サイド1"),
-    (0x06, "マウス サイド2"),
-    (0xA0, "左Shift"),
-    (0xA2, "左Ctrl"),
-    (0xA4, "左Alt"),
-    (0x1D, "無変換"),
-    (0x7B, "F12"),
-];
+/// プッシュトゥトークに選べるキー (Windows仮想キーコード, 現在の言語での表示名)
+fn ptt_keys() -> [(i32, &'static str); 7] {
+    let t = t();
+    [
+        (0x05, t.key_mouse_side1),
+        (0x06, t.key_mouse_side2),
+        (0xA0, t.key_lshift),
+        (0xA2, t.key_lctrl),
+        (0xA4, t.key_lalt),
+        (0x1D, t.key_muhenkan),
+        (0x7B, t.key_f12),
+    ]
+}
 
 struct VolumeChange {
     name: String,
@@ -174,8 +197,18 @@ struct App {
 }
 
 impl App {
-    fn new(cc: &eframe::CreationContext<'_>, minimized: bool) -> Self {
+    fn new(
+        cc: &eframe::CreationContext<'_>,
+        minimized: bool,
+        lang_override: Option<i18n::Lang>,
+    ) -> Self {
         let config = Config::load();
+        // 言語を確定してから各スレッド(トレイ等)を起動する
+        let lang = lang_override
+            .or(config.language)
+            .unwrap_or_else(i18n::detect_os_lang);
+        i18n::set(lang);
+
         let (input_devices, output_devices) = audio::list_devices();
 
         let exiting = Arc::new(AtomicBool::new(false));
@@ -247,11 +280,11 @@ impl App {
         let mut changed = false;
         ui.horizontal(|ui| {
             ui.label(label);
-            let current = selected.as_deref().unwrap_or("(既定のデバイス)");
+            let current = selected.as_deref().unwrap_or(t().default_device);
             egui::ComboBox::from_id_salt(id).selected_text(current).width(240.0).show_ui(
                 ui,
                 |ui| {
-                    if ui.selectable_label(selected.is_none(), "(既定のデバイス)").clicked() {
+                    if ui.selectable_label(selected.is_none(), t().default_device).clicked() {
                         if selected.is_some() {
                             *selected = None;
                             changed = true;
@@ -277,7 +310,7 @@ impl App {
         if Self::device_combo(
             ui,
             "input_device",
-            "入力デバイス:",
+            t().input_device,
             &mut self.config.input_device,
             &self.input_devices,
         ) {
@@ -290,7 +323,7 @@ impl App {
         if Self::device_combo(
             ui,
             "output_device",
-            "出力デバイス:",
+            t().output_device,
             &mut self.config.output_device,
             &self.output_devices,
         ) {
@@ -303,11 +336,11 @@ impl App {
 
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            ui.label("送信モード:");
+            ui.label(t().voice_mode);
             for (mode, name) in [
-                (VoiceMode::Always, "常時送信"),
-                (VoiceMode::VoiceActivation, "ボイス検出"),
-                (VoiceMode::PushToTalk, "プッシュトゥトーク"),
+                (VoiceMode::Always, t().mode_always),
+                (VoiceMode::VoiceActivation, t().mode_vad),
+                (VoiceMode::PushToTalk, t().mode_ptt),
             ] {
                 if ui.radio(self.config.voice_mode == mode, name).clicked()
                     && self.config.voice_mode != mode
@@ -322,7 +355,7 @@ impl App {
         match self.config.voice_mode {
             VoiceMode::VoiceActivation => {
                 ui.horizontal(|ui| {
-                    ui.label("閾値:");
+                    ui.label(t().vad_threshold);
                     if ui
                         .add(
                             egui::Slider::new(&mut self.config.vad_threshold_db, -70.0..=0.0)
@@ -338,7 +371,7 @@ impl App {
                 let level = controls.input_level_db();
                 let fraction = ((level + 70.0) / 70.0).clamp(0.0, 1.0);
                 ui.horizontal(|ui| {
-                    ui.label("入力レベル:");
+                    ui.label(t().input_level);
                     ui.add(
                         egui::ProgressBar::new(fraction)
                             .desired_width(200.0)
@@ -348,8 +381,9 @@ impl App {
             }
             VoiceMode::PushToTalk => {
                 ui.horizontal(|ui| {
-                    ui.label("キー:");
-                    let current = PTT_KEYS
+                    ui.label(t().ptt_key);
+                    let keys = ptt_keys();
+                    let current = keys
                         .iter()
                         .find(|(vk, _)| *vk == self.config.ptt_vk)
                         .map(|(_, name)| *name)
@@ -357,7 +391,7 @@ impl App {
                     egui::ComboBox::from_id_salt("ptt_key").selected_text(current).show_ui(
                         ui,
                         |ui| {
-                            for (vk, name) in PTT_KEYS {
+                            for (vk, name) in &keys {
                                 if ui
                                     .selectable_label(self.config.ptt_vk == *vk, *name)
                                     .clicked()
@@ -370,7 +404,7 @@ impl App {
                             }
                         },
                     );
-                    ui.weak("(ウィンドウ非フォーカスでも有効)");
+                    ui.weak(t().ptt_note);
                 });
             }
             VoiceMode::Always => {}
@@ -388,9 +422,9 @@ impl App {
         let mut delete: Option<usize> = None;
 
         egui::Grid::new("profiles_grid").num_columns(4).spacing([8.0, 4.0]).show(ui, |ui| {
-            ui.strong("プロファイル名");
-            ui.strong("アドレス");
-            ui.strong("ニックネーム");
+            ui.strong(t().col_profile_name);
+            ui.strong(t().col_address);
+            ui.strong(t().col_nickname);
             ui.label("");
             ui.end_row();
 
@@ -425,7 +459,7 @@ impl App {
                 // 最後の1件は消せない(接続先が空になるのを防ぐ)
                 if ui
                     .add_enabled(count > 1, egui::Button::new("－"))
-                    .on_hover_text("このプロファイルを削除")
+                    .on_hover_text(t().delete_profile)
                     .clicked()
                 {
                     delete = Some(i);
@@ -434,7 +468,7 @@ impl App {
             }
         });
 
-        if ui.button("＋").on_hover_text("プロファイルを追加").clicked() {
+        if ui.button("＋").on_hover_text(t().add_profile).clicked() {
             // ニックネームは使い回すことが多いので直前の値を引き継ぐ
             let nickname =
                 self.config.profiles.last().map(|p| p.nickname.clone()).unwrap_or_default();
@@ -457,7 +491,7 @@ impl App {
             save = true;
         }
 
-        ui.weak("StreamDeckから名前指定で接続: /api/connect/プロファイル名");
+        ui.weak(t().api_hint);
 
         if save {
             self.config.save();
@@ -465,8 +499,33 @@ impl App {
     }
 
     fn general_settings_ui(&mut self, ui: &mut egui::Ui) {
+        // 言語選択。ユーザーが明示的に選んだ時点でconfigに固定される
+        ui.horizontal(|ui| {
+            ui.label(t().language_label);
+            let current = match i18n::lang() {
+                i18n::Lang::Ja => "日本語",
+                i18n::Lang::En => "English",
+            };
+            egui::ComboBox::from_id_salt("language_select").selected_text(current).show_ui(
+                ui,
+                |ui| {
+                    for (lang, name) in
+                        [(i18n::Lang::Ja, "日本語"), (i18n::Lang::En, "English")]
+                    {
+                        if ui.selectable_label(i18n::lang() == lang, name).clicked()
+                            && i18n::lang() != lang
+                        {
+                            i18n::set(lang);
+                            self.config.language = Some(lang);
+                            self.config.save();
+                        }
+                    }
+                },
+            );
+        });
+
         let mut auto_start = self.config.auto_start;
-        if ui.checkbox(&mut auto_start, "Windows起動時に自動起動(トレイに格納)").changed() {
+        if ui.checkbox(&mut auto_start, t().auto_start).changed() {
             match build_auto_launch() {
                 Ok(auto) => {
                     let result = if auto_start { auto.enable() } else { auto.disable() };
@@ -475,14 +534,16 @@ impl App {
                             self.config.auto_start = auto_start;
                             self.config.save();
                         }
-                        Err(e) => self.push_log(format!("自動起動の設定に失敗: {e}")),
+                        Err(e) => {
+                            self.push_log(fmt(t().auto_start_failed, &[&e.to_string()]))
+                        }
                     }
                 }
-                Err(e) => self.push_log(format!("自動起動の設定に失敗: {e}")),
+                Err(e) => self.push_log(fmt(t().auto_start_failed, &[&e.to_string()])),
             }
         }
         ui.horizontal(|ui| {
-            ui.label("StreamDeck用API:");
+            ui.label(t().api_label);
             ui.monospace(format!("http://127.0.0.1:{}/api/", self.config.api_port));
         });
         ui.weak("connect / disconnect / mute/on / mute/off / mute/toggle / status");
@@ -521,23 +582,23 @@ impl App {
         ctx.show_viewport_immediate(
             egui::ViewportId::from_hash_of("settings_window"),
             egui::ViewportBuilder::default()
-                .with_title("設定 - TS3 Client")
-                .with_inner_size([560.0, 330.0]),
+                .with_title(t().settings_title)
+                .with_inner_size([560.0, 360.0]),
             |ui, _class| {
                 if ui.ctx().input(|i| i.viewport().close_requested()) {
                     open = false;
                 }
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     ui.add_space(8.0);
-                    ui.heading("プロファイル設定");
+                    ui.heading(t().profile_settings);
                     self.profile_settings_ui(ui);
                     ui.add_space(8.0);
                     ui.separator();
-                    ui.heading("音声設定");
+                    ui.heading(t().audio_settings);
                     self.voice_settings_ui(ui);
                     ui.add_space(8.0);
                     ui.separator();
-                    ui.heading("一般設定");
+                    ui.heading(t().general_settings);
                     self.general_settings_ui(ui);
                     ui.add_space(8.0);
                 });
@@ -572,7 +633,7 @@ impl eframe::App for App {
             ui.add_space(4.0);
             let connected = !matches!(self.status, Status::Disconnected | Status::Error(_));
             ui.horizontal(|ui| {
-                ui.label("プロファイル:");
+                ui.label(t().profile_label);
                 ui.add_enabled_ui(!connected, |ui| {
                     let selected_name = self.config.selected().name.clone();
                     egui::ComboBox::from_id_salt("profile_select")
@@ -596,20 +657,18 @@ impl eframe::App for App {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 if connected {
-                    if ui.button("切断").clicked() {
+                    if ui.button(t().disconnect).clicked() {
                         let _ = self.handle.commands.send(Command::Disconnect);
                     }
                 } else {
                     let profile = self.config.selected();
                     let ready = !profile.address.trim().is_empty()
                         && !profile.nickname.trim().is_empty();
-                    let button = ui.add_enabled(ready, egui::Button::new("接続"));
+                    let button = ui.add_enabled(ready, egui::Button::new(t().connect));
                     let button = if ready {
                         button
                     } else {
-                        button.on_disabled_hover_text(
-                            "設定でプロファイルのアドレスとニックネームを入力してください",
-                        )
+                        button.on_disabled_hover_text(t().connect_hint)
                     };
                     if button.clicked() {
                         self.config.save();
@@ -621,24 +680,24 @@ impl eframe::App for App {
                 }
                 let muted_flag = &self.handle.audio_controls.muted;
                 let mut muted = muted_flag.load(Ordering::Relaxed);
-                if ui.checkbox(&mut muted, "ミュート").changed() {
+                if ui.checkbox(&mut muted, t().mute).changed() {
                     muted_flag.store(muted, Ordering::Relaxed);
                 }
                 match &self.status {
-                    Status::Disconnected => ui.label("未接続"),
-                    Status::Connecting => ui.label("接続中..."),
+                    Status::Disconnected => ui.label(t().status_disconnected),
+                    Status::Connecting => ui.label(t().status_connecting),
                     Status::Connected { server_name } => ui.colored_label(
                         egui::Color32::from_rgb(0, 160, 60),
-                        format!("接続済: {server_name}"),
+                        fmt(t().status_connected, &[server_name]),
                     ),
                     Status::Error(e) => ui.colored_label(
                         egui::Color32::from_rgb(200, 60, 60),
-                        format!("エラー: {e}"),
+                        fmt(t().status_error, &[e]),
                     ),
                 };
                 // 設定ボタンは行の右端に寄せる
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("⚙ 設定").clicked() {
+                    if ui.button(t().settings_button).clicked() {
                         self.settings_open = true;
                     }
                 });
@@ -653,7 +712,7 @@ impl eframe::App for App {
             .default_size(120.0)
             .show(ui, |ui| {
                 ui.add_space(4.0);
-                ui.label("ログ");
+                ui.label(t().log_heading);
                 egui::ScrollArea::vertical().stick_to_bottom(true).show(ui, |ui| {
                     for line in &self.log {
                         ui.small(line);
@@ -666,7 +725,7 @@ impl eframe::App for App {
         egui::CentralPanel::default().show(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 if self.channels.is_empty() {
-                    ui.weak("(チャンネル情報なし)");
+                    ui.weak(t().no_channels);
                 }
                 for channel in &self.channels {
                     ui.label(egui::RichText::new(format!("📁 {}", channel.name)).strong());
@@ -684,11 +743,10 @@ impl eframe::App for App {
                             } else {
                                 format!("👤 {} 🔊{:.0}%", client.name, volume * 100.0)
                             };
-                            let response =
-                                ui.label(label).on_hover_text("右クリックで音量調整");
+                            let response = ui.label(label).on_hover_text(t().volume_hover);
                             response.context_menu(|ui| {
                                 ui.set_min_width(220.0);
-                                ui.label(format!("{} の音量", client.name));
+                                ui.label(fmt(t().volume_of, &[&client.name]));
                                 let mut percent = volume * 100.0;
                                 let slider = ui.add(
                                     egui::Slider::new(&mut percent, 0.0..=200.0).suffix("%"),
@@ -702,7 +760,7 @@ impl eframe::App for App {
                                         save: slider.drag_stopped(),
                                     });
                                 }
-                                if ui.button("100%に戻す").clicked() {
+                                if ui.button(t().reset_100).clicked() {
                                     volume_changes.push(VolumeChange {
                                         name: client.name.clone(),
                                         client_id: client.id,

@@ -54,6 +54,8 @@ pub struct Config {
     pub auto_start: bool,
     /// 相手ごとの再生音量(ニックネーム → 倍率1.0=100%)。IDはセッションごとに変わるため名前で持つ
     pub volumes: std::collections::HashMap<String, f32>,
+    /// UI言語。NoneはOSの言語設定に従う(ユーザーが明示的に選ぶとSomeになる)
+    pub language: Option<crate::i18n::Lang>,
 }
 
 impl Default for Config {
@@ -74,6 +76,7 @@ impl Default for Config {
             api_port: 9871,
             auto_start: false,
             volumes: std::collections::HashMap::new(),
+            language: None,
         }
     }
 }
