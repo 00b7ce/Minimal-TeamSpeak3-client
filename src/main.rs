@@ -169,6 +169,8 @@ struct App {
     output_devices: Vec<String>,
     /// trueのときのみウィンドウの閉じる操作で本当に終了する(通常はトレイへ格納)
     exiting: Arc<AtomicBool>,
+    /// 設定ウィンドウ(別ビューポート)を表示中か
+    settings_open: bool,
 }
 
 impl App {
@@ -195,6 +197,7 @@ impl App {
             input_devices,
             output_devices,
             exiting,
+            settings_open: false,
         };
 
         // 最小化起動: eframeは初回フレーム描画後に必ずウィンドウを表示してしまう
@@ -482,6 +485,40 @@ impl App {
         }
     }
 
+    /// 設定ウィンドウ(OSレベルの別ウィンドウ)。開いている間は毎フレーム描画する
+    fn show_settings_window(&mut self, ctx: egui::Context) {
+        if !self.settings_open {
+            return;
+        }
+        let mut open = true;
+        ctx.show_viewport_immediate(
+            egui::ViewportId::from_hash_of("settings_window"),
+            egui::ViewportBuilder::default()
+                .with_title("設定 - TS3 Client")
+                .with_inner_size([400.0, 520.0]),
+            |ui, _class| {
+                if ui.ctx().input(|i| i.viewport().close_requested()) {
+                    open = false;
+                }
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.add_space(8.0);
+                    ui.heading("サーバ設定");
+                    self.server_settings_ui(ui);
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.heading("音声設定");
+                    self.voice_settings_ui(ui);
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.heading("一般設定");
+                    self.general_settings_ui(ui);
+                    ui.add_space(8.0);
+                });
+            },
+        );
+        self.settings_open = open;
+    }
+
     fn push_log(&mut self, line: String) {
         if self.log.len() >= MAX_LOG_LINES {
             self.log.pop_front();
@@ -569,13 +606,17 @@ impl eframe::App for App {
                         format!("エラー: {e}"),
                     ),
                 };
+                // 設定ボタンは行の右端に寄せる
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("⚙ 設定").clicked() {
+                        self.settings_open = true;
+                    }
+                });
             });
             ui.add_space(4.0);
-            egui::CollapsingHeader::new("サーバ設定").show(ui, |ui| self.server_settings_ui(ui));
-            egui::CollapsingHeader::new("音声設定").show(ui, |ui| self.voice_settings_ui(ui));
-            egui::CollapsingHeader::new("一般設定").show(ui, |ui| self.general_settings_ui(ui));
-            ui.add_space(4.0);
         });
+
+        self.show_settings_window(ui.ctx().clone());
 
         egui::Panel::bottom("log_panel")
             .resizable(true)
