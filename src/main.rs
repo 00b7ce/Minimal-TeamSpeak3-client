@@ -100,6 +100,14 @@ fn parse_lang_arg() -> Option<i18n::Lang> {
     None
 }
 
+/// メインウィンドウの固定サイズ。ボタン文言の幅が言語で違うため幅も言語別
+fn main_window_size(lang: i18n::Lang) -> [f32; 2] {
+    match lang {
+        i18n::Lang::Ja => [400.0, 640.0],
+        i18n::Lang::En => [460.0, 640.0],
+    }
+}
+
 fn main() -> eframe::Result {
     init_logging();
 
@@ -107,10 +115,15 @@ fn main() -> eframe::Result {
     let minimized = std::env::args().any(|a| a == "--minimized");
     // 言語の優先順位: 起動オプション > 設定ファイル > OSの言語設定
     let lang_override = parse_lang_arg();
+    let lang = lang_override
+        .or(Config::load().language)
+        .unwrap_or_else(i18n::detect_os_lang);
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([420.0, 640.0])
+            .with_inner_size(main_window_size(lang))
+            .with_resizable(false)
+            .with_maximize_button(false)
             .with_visible(!minimized),
         ..Default::default()
     };
@@ -157,6 +170,10 @@ fn setup_fonts(ctx: &egui::Context) {
         .or_default()
         .push("noto_sans_jp".to_owned());
     ctx.set_fonts(fonts);
+
+    // デバッグビルドでeguiが出す「ピクセル境界ずれ」の赤枠警告を無効化する
+    // (パネルの出現アニメーション中に一瞬表示されて紛らわしいため)
+    ctx.all_styles_mut(|style| style.debug.show_unaligned = false);
 }
 
 const MAX_LOG_LINES: usize = 200;
@@ -518,11 +535,22 @@ impl App {
                             i18n::set(lang);
                             self.config.language = Some(lang);
                             self.config.save();
+                            // ボタン文言の幅が変わるためメインウィンドウの幅も追従させる
+                            ui.ctx().send_viewport_cmd_to(
+                                egui::ViewportId::ROOT,
+                                egui::ViewportCommand::InnerSize(main_window_size(lang).into()),
+                            );
                         }
                     }
                 },
             );
         });
+
+        let mut show_log = self.config.show_log;
+        if ui.checkbox(&mut show_log, t().show_log).changed() {
+            self.config.show_log = show_log;
+            self.config.save();
+        }
 
         let mut auto_start = self.config.auto_start;
         if ui.checkbox(&mut auto_start, t().auto_start).changed() {
@@ -583,11 +611,12 @@ impl App {
             egui::ViewportId::from_hash_of("settings_window"),
             egui::ViewportBuilder::default()
                 .with_title(t().settings_title)
-                .with_inner_size([560.0, 360.0]),
+                .with_inner_size([560.0, 440.0]),
             |ui, _class| {
                 if ui.ctx().input(|i| i.viewport().close_requested()) {
                     open = false;
                 }
+                // プロファイルが増えても操作できるようスクロール可能にしておく
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     ui.add_space(8.0);
                     ui.heading(t().profile_settings);
@@ -632,6 +661,7 @@ impl eframe::App for App {
         egui::Panel::top("connection_panel").show(ui, |ui| {
             ui.add_space(4.0);
             let connected = !matches!(self.status, Status::Disconnected | Status::Error(_));
+            // 1行目: プロファイル選択 → 接続/切断、右端(ウィンドウ右上)に設定
             ui.horizontal(|ui| {
                 ui.label(t().profile_label);
                 ui.add_enabled_ui(!connected, |ui| {
@@ -653,9 +683,6 @@ impl eframe::App for App {
                             }
                         });
                 });
-            });
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
                 if connected {
                     if ui.button(t().disconnect).clicked() {
                         let _ = self.handle.commands.send(Command::Disconnect);
@@ -678,6 +705,17 @@ impl eframe::App for App {
                         });
                     }
                 }
+                // 設定はオプション操作としてウィンドウ右上の端に置く
+                // (ウィンドウ幅を内容に合わせているため接続ボタンとの間隔は小さい)
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(t().settings_button).clicked() {
+                        self.settings_open = true;
+                    }
+                });
+            });
+            ui.add_space(4.0);
+            // 2行目: ミュートと接続状態
+            ui.horizontal(|ui| {
                 let muted_flag = &self.handle.audio_controls.muted;
                 let mut muted = muted_flag.load(Ordering::Relaxed);
                 if ui.checkbox(&mut muted, t().mute).changed() {
@@ -695,30 +733,26 @@ impl eframe::App for App {
                         fmt(t().status_error, &[e]),
                     ),
                 };
-                // 設定ボタンは行の右端に寄せる
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button(t().settings_button).clicked() {
-                        self.settings_open = true;
-                    }
-                });
             });
             ui.add_space(4.0);
         });
 
         self.show_settings_window(ui.ctx().clone());
 
-        egui::Panel::bottom("log_panel")
-            .resizable(true)
-            .default_size(120.0)
-            .show(ui, |ui| {
-                ui.add_space(4.0);
-                ui.label(t().log_heading);
-                egui::ScrollArea::vertical().stick_to_bottom(true).show(ui, |ui| {
-                    for line in &self.log {
-                        ui.small(line);
-                    }
+        if self.config.show_log {
+            egui::Panel::bottom("log_panel")
+                .resizable(true)
+                .default_size(120.0)
+                .show(ui, |ui| {
+                    ui.add_space(4.0);
+                    ui.label(t().log_heading);
+                    egui::ScrollArea::vertical().stick_to_bottom(true).show(ui, |ui| {
+                        for line in &self.log {
+                            ui.small(line);
+                        }
+                    });
                 });
-            });
+        }
 
         // コンテキストメニュー内では&mut selfを取れないため、音量変更は集めてから適用する
         let mut volume_changes: Vec<VolumeChange> = Vec::new();

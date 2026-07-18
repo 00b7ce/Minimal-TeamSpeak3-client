@@ -56,6 +56,8 @@ pub struct Config {
     pub volumes: std::collections::HashMap<String, f32>,
     /// UI言語。NoneはOSの言語設定に従う(ユーザーが明示的に選ぶとSomeになる)
     pub language: Option<crate::i18n::Lang>,
+    /// メインウィンドウ下部にログ欄を表示する
+    pub show_log: bool,
 }
 
 impl Default for Config {
@@ -77,6 +79,7 @@ impl Default for Config {
             auto_start: false,
             volumes: std::collections::HashMap::new(),
             language: None,
+            show_log: false,
         }
     }
 }

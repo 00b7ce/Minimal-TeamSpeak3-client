@@ -100,6 +100,7 @@ pub struct Texts {
     pub auto_start_failed: &'static str,
     pub api_label: &'static str,
     pub language_label: &'static str,
+    pub show_log: &'static str,
 
     // ---- トレイ ----
     pub tray_open: &'static str,
@@ -211,6 +212,7 @@ pub static EN: Texts = Texts {
     auto_start_failed: "Failed to configure autostart: {0}",
     api_label: "StreamDeck API:",
     language_label: "Language:",
+    show_log: "Show log panel",
 
     tray_open: "Open",
     tray_exit: "Exit",
@@ -301,6 +303,7 @@ pub static JA: Texts = Texts {
     auto_start_failed: "自動起動の設定に失敗: {0}",
     api_label: "StreamDeck用API:",
     language_label: "言語:",
+    show_log: "ログを表示",
 
     tray_open: "開く",
     tray_exit: "終了",
